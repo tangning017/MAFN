@@ -271,7 +271,14 @@ def main(_):
         gpu_options = tf.GPUOptions(allow_growth=True)
         with tf.Session(config=tf.ConfigProto(gpu_options=gpu_options)) as session:
             session.run(tf.initializers.global_variables())
-
+            total_parameters = 0
+            for variable in tf.trainable_variables():
+                shape = variable.get_shape()
+                variable_parameters = 1
+                for dim in shape:
+                    variable_parameters += dim.value
+                total_parameters += variable_parameters
+            logger.info("total parameters: %d", total_parameters)
             for i in range(NUM_EPOCH):
                 logger.info("In iteration: %d" % (i+1))
                 _, _, summary,_ = run_epoch(session, merged, train_model, train_data, train_model.train_op, 'train', True)
