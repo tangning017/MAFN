@@ -92,12 +92,12 @@ class StockMovementPrediction(object):
 #                 self.variable_summary(state, 'RNN/state')
                 outputs.append(cell_output)
         ################### MLP next day predict ##################
-        with tf.variable_scope('step_output'):
-            output = tf.reshape(outputs, [-1, HIDDEN_SIZE])
-            logits = tf.layers.dense(output, NUM_CLASS, name="step_output", use_bias=False)
-        with tf.name_scope('step_loss_function'):
-            targets = tf.reshape(self.step_targets, [-1])
-            step_loss = tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=targets))
+#         with tf.variable_scope('step_output'):
+#             output = tf.reshape(outputs, [-1, HIDDEN_SIZE])
+#             logits = tf.layers.dense(output, NUM_CLASS, name="step_output", use_bias=False, activation=tf.nn.selu)
+#         with tf.name_scope('step_loss_function'):
+#             targets = tf.reshape(self.step_targets, [-1])
+#             step_loss = tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=targets))
 #             self.acc = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(logits, -1), targets), tf.float32))
 #             self.prediction = tf.argmax(logits, -1)
 #             self.cost = tf.reduce_sum(loss) / tf.cast(self.batch_size, tf.float32)
@@ -115,18 +115,19 @@ class StockMovementPrediction(object):
             
             helper = tf.contrib.seq2seq.TrainingHelper(outputs, [PREDICT_STEPS for _ in range(self.batch_size)], time_major=True)
             decoder_initial_state = decoder_cell.zero_state(self.batch_size, tf.float32).clone(cell_state=state[0])
-            projection_layer = layers_core.Dense(units=NUM_CLASS, use_bias=False)
+            projection_layer = layers_core.Dense(units=NUM_CLASS, use_bias=False, activation=tf.nn.selu)
             decoder = tf.contrib.seq2seq.BasicDecoder(decoder_cell, helper, decoder_initial_state, output_layer=projection_layer)
             outputs, _, _ = tf.contrib.seq2seq.dynamic_decode(decoder)
             logits = outputs.rnn_output
         
         with tf.name_scope("loss_function"):
             crossent = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.targets, logits=logits)
-            loss = (1-LAMBDA)*(tf.reduce_sum(crossent) + step_loss) + LAMBDA*self.att_loss
+            loss = (1-LAMBDA)*(tf.reduce_sum(crossent)) + LAMBDA*self.att_loss
             self.cost = loss/tf.cast(self.batch_size, tf.float32)
             self.prediction = tf.argmax(logits, -1)
             result = tf.cast(tf.equal(self.prediction, self.targets), tf.float32)
             self.acc = [tf.reduce_mean(result[:, ind]) for ind in range(PREDICT_STEPS)]
+            self.acc += [tf.reduce_mean(result)]
         if not self.is_training:
             return
         
@@ -156,8 +157,8 @@ class StockMovementPrediction(object):
             # linear projection
             with tf.variable_scope('linear_projection'):
                 v = tf.tile(v, [1, 1, EMBEDDING_DIM*self.num_head])
-                vp_k = tf.layers.dense(v, self.linear_dim*self.num_head, use_bias=False)
-                vp_v = tf.layers.dense(v, self.linear_dim*self.num_head, use_bias=False)
+                vp_k = tf.layers.dense(v, self.linear_dim*self.num_head, use_bias=False, activation=tf.nn.selu)
+                vp_v = tf.layers.dense(v, self.linear_dim*self.num_head, use_bias=False, activation=tf.nn.selu)
             # split_heads
             with tf.variable_scope('split_head'):
                 def split_last_dimension_then_transpose(tensor, num_heads, dim):
@@ -189,15 +190,19 @@ class StockMovementPrediction(object):
                 ## [B, head, max_sequence, dim] --> repreat each att score dim times
                 o3 = tf.reduce_sum(tf.multiply(o2, vs_v), axis=-2)
         
-        with tf.variable_scope('static_attention'):
-            att = tf.layers.dense(self.stock_embedding, self.num_head, name="static_attention", use_bias=False)
-            # att [BATCH_SIZE, NUM_HEAD], O3 [BATCH_SIZE, NUM_HEAD, DIM]
-            att = tf.nn.softmax(att)
-            self.variable_summary(att, 'singleattention')
-            att = tf.expand_dims(att, -1)
-            att = tf.tile(att, [1, 1, self.linear_dim])
-            output = tf.reduce_sum(tf.multiply(att, o3), axis=-2)
+#         with tf.variable_scope('static_attention'):
+#             att = tf.layers.dense(self.stock_embedding, self.num_head, name="static_attention", use_bias=False)
+#             # att [BATCH_SIZE, NUM_HEAD], O3 [BATCH_SIZE, NUM_HEAD, DIM]
+#             att = tf.nn.softmax(att)
+#             self.variable_summary(att, 'singleattention')
+#             att = tf.expand_dims(att, -1)
+#             att = tf.tile(att, [1, 1, self.linear_dim])
+#             output = tf.reduce_sum(tf.multiply(att, o3), axis=-2)
 #             output = tf.layers.dense(output, HIDDEN_SIZE, name="attention_output")
+        ### average pooling ######
+#         output = tf.reduce_mean(o3, axis=-2)
+#         ### max pooling #########
+        output = tf.reduce_max(o3, axis=-2)
         if not self.is_training:
             return output
         return tf.nn.dropout(output, 1.0 - self.drop_out)
@@ -208,7 +213,7 @@ def run_epoch(session, merged, model, data, train_op, flag, output_log):
     iters = 0
     cnt = 0
     mcc = 0
-    all_acc = np.zeros(PREDICT_STEPS)
+    all_acc = np.zeros(PREDICT_STEPS+1)
     all_tn = all_tp = all_fp = all_fn = 0
     
     for x, y, y_step, news, stockid in reader.news_iterator(data, model.batch_size, model.num_steps, model.max_num_news, flag):
@@ -220,7 +225,7 @@ def run_epoch(session, merged, model, data, train_op, flag, output_log):
         total_costs += cost
         iters += model.num_steps
         cnt += 1
-        for i in range(PREDICT_STEPS):
+        for i in range(PREDICT_STEPS+1):
             all_acc[i] += acc[i]
         #print(len(y.reshape(-1)), len(prediction.reshape(-1)))        
         #tn, fp, fn, tp = confusion_matrix(y_true=y.reshape(-1), y_pred=prediction.reshape(-1)).ravel()
@@ -231,7 +236,7 @@ def run_epoch(session, merged, model, data, train_op, flag, output_log):
         #mcc = (all_tp * all_tn - all_fp * all_fn) / math.sqrt((all_tp + all_fp) * (all_tp + all_fn) * (all_tn + all_fp) * (all_tn + all_fn))
         if output_log and iters % 1000 == 0:
             logger.info("After %d steps, cost is %.3f Mcc %.5f" % (iters, total_costs / iters, mcc))  
-            for i in range(PREDICT_STEPS):
+            for i in range(PREDICT_STEPS+1):
                 logger.info("predict step %d acc: %.5f", i, all_acc[i]/cnt)
     return total_costs/iters, all_acc/cnt, summary, mcc
 
@@ -285,11 +290,11 @@ def main(_):
                 writer.add_summary(summary, i)
                 valid_cost, acc, _, mcc = run_epoch(session, merged, train_model, valid_data, tf.no_op(), 'valid', False)
                 logger.info("Epoch: %d Validation Cost: %.3f, mcc is %.5f" % (i+1, valid_cost, mcc))
-                for i in range(PREDICT_STEPS):
+                for i in range(PREDICT_STEPS+1):
                     logger.info("predict step %d acc: %.5f", i, acc[i])
             test_cost, acc, _, mcc = run_epoch(session, merged, train_model, test_data, tf.no_op(), 'test', False)
             logger.info("Test Cost: %.3f, mcc is %.5f" % (test_cost, mcc))
-            for i in range(PREDICT_STEPS):
+            for i in range(PREDICT_STEPS+1):
                     logger.info("predict step %d acc: %.5f", i, acc[i])
             saver.save(session, f'model_saver/{info}model_btch{batch_size}_h{num_head}_d{drop_out}_step{num_steps}_news{max_num_news}_lr{lr}.ckpt')
 
