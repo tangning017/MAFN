@@ -20,8 +20,8 @@ import ast
 
 root_path = 'data/tweet/file2'
 vec_path = 'data/tweet'
-# feature_col = ['high', 'low', 'close']
-feature_col = ['High_rate', 'Low_rate', 'close']
+feature_col = ['high', 'low', 'close']
+# feature_col = ['High_rate', 'Low_rate', 'close']
 label_col = ['label', 'label2', 'label3', 'label4', 'label5']
 # label_col = ['label']
 embed_size = 50
