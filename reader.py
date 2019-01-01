@@ -1,27 +1,28 @@
 import numpy as np
 # import matplotlib.pyplot as plt
 import os
-import re
 import pandas as pd
 import pickle
 from tqdm import tqdm
 import json
 import ast
-#root_path = 'data/news'
-#preprocess_path = os.path.join(root_path, "file/preprocess.pkl")
-#feature_col =['actPreClosePrice','openPrice','highestPrice','lowestPrice',\
-#              'closePrice','turnoverRate','accumAdjFactor','chgPct','PE','PE1','PB','vwap']
-#embed_size = 300
-# training_begin_date = 20140101
-# training_end_date = 20170101
-# validing_end_date = 20170701
-# testing_end_date = 20180301
-#info = 'news'
 
-root_path = 'data/tweet/file2'
+
+#   root_path = 'data/news'
+#   preprocess_path = os.path.join(root_path, "file/preprocess.pkl")
+#   feature_col =['actPreClosePrice','openPrice','highestPrice','lowestPrice',\
+#              'closePrice','turnoverRate','accumAdjFactor','chgPct','PE','PE1','PB','vwap']
+#   embed_size = 300
+#   training_begin_date = 20140101
+#   training_end_date = 20170101
+#   validing_end_date = 20170701
+#   testing_end_date = 20180301
+#   info = 'news'
+
+root_path = 'data/tweet/file'
 vec_path = 'data/tweet'
-feature_col = ['high', 'low', 'close']
-# feature_col = ['High_rate', 'Low_rate', 'close']
+# feature_col = ['high', 'low', 'close']
+feature_col = ['High_rate', 'Low_rate', 'close']
 label_col = ['label', 'label2', 'label3', 'label4', 'label5']
 # label_col = ['label']
 embed_size = 50
@@ -33,17 +34,28 @@ info = 'tweets'
 
 TRAIN = 'train'
 
-class Preprocess_data(object):
-    def __init__(self, x_all, y_all, y_step_all, news_all, stock_id):
-        self.x_all = x_all
-        self.y_all = y_all
-        self.y_step_all = y_step_all
-        self.news_all = news_all
-        self.stock_id = stock_id
 
-def news_iterator(data, batch_size, num_step, max_sequence, flag):
+def init_word_table():
     with open(os.path.join(vec_path, "vocab_vec.json"), 'r') as f:
         dit = json.load(f)
+        vocab_size = len(dit) + 2   # add one unknown symbol and one all zeros padding vector
+
+    word_table_init = np.random.random((vocab_size, embed_size)) * 2 - 1  # [-1.0, 1.0]
+    word2id = {word: i for i, word in enumerate(dit.keys())}
+    word2vec = {word: [float(i) for i in dit[word]] for word in dit.keys()}
+    for word in word2id.keys():
+        try:
+            word_table_init[word2id[word]] = word2vec[word]
+        except:
+            print(word, len(word2vec[word]))
+    return word_table_init, vocab_size
+
+
+def news_iterator(data, batch_size, num_step, max_news_sequence, max_word_sequence, flag):
+    with open(os.path.join(vec_path, "vocab_vec.json"), 'r') as f:
+        dit = json.load(f)
+        word2id = {word: i for i, word in enumerate(dit.keys())}
+
     preprocess_path = 'train_preprocess.pkl'
     if flag == 'valid':
         preprocess_path = 'valid_preprocess.pkl' 
@@ -76,38 +88,34 @@ def news_iterator(data, batch_size, num_step, max_sequence, flag):
                 for j in range(num_step):
                     x += [list(prices.iloc[ind+j])]
                     y_step += [list(label.iloc[ind+j])[0]]# label1
-                    tmp_vec = []
+                    tmp_word_id = []
                     if len(str(news_lis[ind+j])) < 4:
-                        news += [[np.zeros(embed_size) for _ in range(max_sequence)]]
+                        news.append(np.full((max_news_sequence, max_word_sequence), len(word2id)+1))  # padding
                         continue
                     else:
                         news_l = ast.literal_eval(news_lis[ind+j])
-                    if len(news_l) > max_sequence: # daily news number larger than max_sequence we sample
+                    if len(news_l) > max_news_sequence: # daily news number larger than max_sequence we sample
                         indices = list(range(len(news_l)))
                         np.random.shuffle(indices)
-                        for k in indices[:max_sequence]:
-                            vec = [dit[word] for word in news_l[k] if word in dit]
-                            if len(vec) != 0:
-                                tmp_vec += [np.mean(vec, axis=0)]
-                            else:
-                                tmp_vec += [np.zeros(embed_size)]
+                        for k in indices[:max_news_sequence]:
+                            word_id = [word2id[word] if word in word2id else len(word2id) for word in news_l[k]]
+                            for _ in range(len(word_id), max_word_sequence):
+                                word_id.append(len(word2id)+1)
+                            tmp_word_id.append(word_id[:max_word_sequence])
                     else: # daily news number smaller than max_sequence we fill with zeros
                         for k in range(len(news_l)):
-                            vec = [dit[word] for word in news_l[k] if word in dit]
-                            if len(vec) != 0:
-                                tmp_vec += [np.mean(vec, axis=0)]
-                            else:
-                                tmp_vec += [np.zeros(embed_size)]
-                        
-                        tmp_vec.extend([np.zeros(embed_size) for _ in range(len(news_l), max_sequence)])
-                    news += [tmp_vec]
+                            word_id = [word2id[word] if word in word2id else len(word2id) for word in news_l[k]]
+                            for _ in range(len(word_id), max_word_sequence):
+                                word_id.append(len(word2id)+1)
+                            tmp_word_id.append(word_id[:max_word_sequence])
+                        tmp_word_id.extend([np.full(max_word_sequence, len(word2id)+1)
+                                            for _ in range(len(news_l), max_news_sequence)])
+                    news += [tmp_word_id]
                 x_all += [x]
                 y_all += [y]
                 y_step_all += [y_step]
                 news_all += [news]
                 stock_id += [i]
-#         pdata = Preprocess_data(x_all, y_all, y_step_all, news_all, stock_id)
-#         pickle.dump(pdata, open(preprocess_path, 'wb'))
     for batch in range(len(x_all)//batch_size):
         indices = list(range(len(x_all)))
         if flag == TRAIN:
@@ -125,10 +133,11 @@ def news_iterator(data, batch_size, num_step, max_sequence, flag):
             stock_id_batch += [stock_id[indices[i]]]
 #         print(news_batch)
         yield np.array(x_batch, dtype=np.float32),\
-                np.array(y_batch, dtype=np.int64),\
-                np.array(y_step_batch, dtype=np.int64),\
-                np.array(news_batch, dtype=np.float32),\
-                np.array(stock_id_batch, dtype=np.int64)
+            np.array(y_batch, dtype=np.int64),\
+            np.array(y_step_batch, dtype=np.int64),\
+            np.array(news_batch, dtype=np.int64),\
+            np.array(stock_id_batch, dtype=np.int64)
+
 
 def news_raw_data():
     if not os.path.exists(os.path.join(root_path, "train_data.pkl")):
@@ -195,5 +204,5 @@ if __name__ == "__main__":
 #     x, y, news = news_iterator(testing_data, 32, 10, 10)
 #     print(x.shape, y.shape, news.shape)
     print(len(training_data[0]))
-    for a, b, c, d, f in news_iterator(testing_data, 32, 10, 10, 'test'):
+    for a, b, c, d, f in news_iterator(testing_data, 2, 5, 3, 5, 'test'):
         print(a.shape, b.shape, c.shape, d.shape)

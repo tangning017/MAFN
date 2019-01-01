@@ -4,7 +4,6 @@ from __future__ import print_function
 
 import tensorflow as tf
 from tensorflow.python.layers import core as layers_core
-import reader
 import os
 import datetime
 import logging
@@ -14,6 +13,8 @@ from sklearn.metrics import confusion_matrix
 from sklearn.metrics import roc_auc_score
 import math
 import numpy as np
+import reader
+import utils
 
 info = ""
 logger = logging.getLogger('my_logger')
@@ -43,7 +44,8 @@ FEATURE_NUM = 3
 
 
 class StockMovementPrediction(object):
-    def __init__(self, is_training, batch_size, num_steps, linear_dim, num_head, drop_out, max_num_news, lr):
+    def __init__(self, is_training, batch_size, num_steps, linear_dim, num_head, drop_out,
+                 max_num_news, max_num_words, lr, vocab_size):
         self.linear_dim = linear_dim
         self.num_head = num_head
         self.batch_size = batch_size
@@ -51,22 +53,29 @@ class StockMovementPrediction(object):
         self.is_training = is_training
         self.drop_out = drop_out
         self.max_num_news = max_num_news
+        self.max_num_words = max_num_words
         self.lr = lr
-        self.att_loss = 0
         self.hidden_size = HIDDEN_SIZE
+        self.final_state = None
+        self.initial_state = None
 
         assert self.linear_dim % self.num_head == 0
 
         with tf.name_scope('input'):
             self.input_data = tf.placeholder(tf.float32, [None, self.num_steps, FEATURE_NUM], name="price")
             self.targets = tf.placeholder(tf.int64, [None, PREDICT_STEPS], name='label')
-            self.step_targets = tf.placeholder(tf.int64, [None, self.num_steps], name='step_label')
-            self.news = tf.placeholder(tf.float32, [None, self.num_steps, self.max_num_news, EMBEDDING_DIM],
-                                       name='news')
-            self.stock_id = tf.placeholder(tf.int64, [None], name='stocks')
+            # self.step_targets = tf.placeholder(tf.int64, [None, self.num_steps], name='step_label')
+            self.news_ph = tf.placeholder(tf.int64, [None, self.num_steps, self.max_num_news, self.max_num_words], name='news')
+            self.word_table_init = tf.placeholder(tf.float32, [vocab_size, EMBEDDING_DIM], name='word_embedding')
+
+        with tf.name_scope('word_embeddings'):
+            with tf.variable_scope('embeds'):
+                word_table = tf.get_variable('word_table', initializer=self.word_table_init, trainable=False)
+                self.news = tf.nn.embedding_lookup(word_table, self.news_ph, name='news_word_embeds')
 
         logger.info(
-            f"embedding_size:{EMBEDDING_DIM}, max_num_news:{self.max_num_news},lr:{self.lr}, batch_size:{self.batch_size}, num_head:{self.num_head}, drop_out:{self.drop_out}, num_step:{self.num_steps}")
+            f"embedding_size:{EMBEDDING_DIM}, max_num_news:{self.max_num_news},lr:{self.lr}, "
+            f"batch_size:{self.batch_size}, num_head:{self.num_head}, drop_out:{self.drop_out}, num_step:{self.num_steps}")
 
         outputs = self.encode()
         logits = self.decode(outputs, self.final_state)
@@ -80,13 +89,16 @@ class StockMovementPrediction(object):
         if not self.is_training:
             return
 
-        ################### Optimizer #############################
+        # Optimizer #
         global_step = tf.Variable(0)
         learning_rate = tf.train.exponential_decay(self.lr, global_step, DECAY_STEP, DECAY_RATE, staircase=True)
         tf.summary.scalar('learning_rate', learning_rate)
         self.train_op = tf.train.AdamOptimizer(learning_rate).minimize(self.loss, global_step=global_step)
 
     def encode(self):
+        """
+        :return:
+        """
         lstm_cell = tf.contrib.rnn.LayerNormBasicLSTMCell(self.hidden_size)
         if self.is_training:
             lstm_cell = tf.contrib.rnn.LayerNormBasicLSTMCell(self.hidden_size, dropout_keep_prob=1 - self.drop_out)
@@ -95,14 +107,28 @@ class StockMovementPrediction(object):
 
         outputs = []
         state = self.initial_state
-        with tf.variable_scope("RNN_encoder"):
+
+        with tf.variable_scope("encoder"):
             for time_step in range(self.num_steps):
                 if time_step > 0:
                     tf.get_variable_scope().reuse_variables()
-                with tf.name_scope('multihead_attention'):
-                    input1 = self._multi_head_self_attention(self.news[:, time_step, :, :])
-                    input1 = tf.concat([self.input_data[:, time_step, :], input1], -1)
-                cell_output, state = cell(input1, state)
+                with tf.variable_scope("word_level_self_attention", reuse=tf.AUTO_REUSE):
+                    news = []
+                    for news_num in range(self.max_num_news):
+                        # [batch_size, max_sequence, num_head, embedding]
+                        one_news = self._multi_head_self_attention(self.news[:, time_step, news_num, :, :],
+                                                                   self.num_head, self.linear_dim, self.drop_out)
+                        pooled_news = self._pooling(one_news)   # [batch_size, num_head, embedding]
+                        pooled_news = tf.reshape(pooled_news, [self.batch_size, self.num_head*EMBEDDING_DIM])  #[batch_size, num_head*embedding]
+                        news.append(pooled_news)
+                    news = tf.transpose(news, [1, 0, 2])    # [batch_size, max_num_news, num_head*embedding]
+                with tf.variable_scope('news_level_self_attention', reuse=tf.AUTO_REUSE):
+                    news = self._multi_head_self_attention(news, self.num_head, self.linear_dim, self.drop_out)
+                    pooled_news = self._pooling(news)   # [batch_size, num_head, embedding]
+                    att_news = self._single_attention(pooled_news, state[0].h)
+
+                lstm_input = tf.concat([self.input_data[:, time_step, :], att_news], -1)
+                cell_output, state = cell(lstm_input, state)
                 outputs.append(cell_output)
         self.final_state = state
         return outputs
@@ -115,7 +141,7 @@ class StockMovementPrediction(object):
         return the predicted logits
         """
         with tf.variable_scope("RNN_decoder"):
-            ### [batch_size, max_time, num_units]
+            # [batch_size, max_time, num_units]
             attention_states = tf.transpose(encode, [1, 0, 2])
             attention_mechanism = tf.contrib.seq2seq.LuongAttention(self.hidden_size, attention_states)
 
@@ -126,7 +152,7 @@ class StockMovementPrediction(object):
             decoder_cell = tf.contrib.seq2seq.AttentionWrapper(decoder_cell, attention_mechanism,
                                                                attention_layer_size=self.hidden_size)
 
-            helper = tf.contrib.seq2seq.TrainingHelper(outputs, [PREDICT_STEPS for _ in range(self.batch_size)],
+            helper = tf.contrib.seq2seq.TrainingHelper(encode, [PREDICT_STEPS for _ in range(self.batch_size)],
                                                        time_major=True)
             decoder_initial_state = decoder_cell.zero_state(self.batch_size, tf.float32).clone(cell_state=state[0])
             projection_layer = layers_core.Dense(units=NUM_CLASS, use_bias=False)
@@ -136,11 +162,10 @@ class StockMovementPrediction(object):
             logits = outputs.rnn_output
         return logits
 
-    def _multi_head_self_attention(self, v, num_head, max_seq_len, dim, drop_out):
-        with tf.name_scope('transformer'):
+    def _multi_head_self_attention(self, v, num_head, dim, drop_out):
+        with tf.name_scope('multi_head_self_attention'):
             # linear projection
             with tf.variable_scope('linear_projection'):
-                v = tf.tile(v, [1, 1, num_head])
                 vp_q = tf.layers.dense(v, dim, use_bias=False)
                 vp_k = tf.layers.dense(v, dim, use_bias=False)
                 vp_v = tf.layers.dense(v, dim, use_bias=False)
@@ -157,17 +182,39 @@ class StockMovementPrediction(object):
             #             depth = dim // num_head
             #             vs_q *= depth ** -0.5
 
-            #             bias = tf.get_variable("self_attention_bias")
+            # mask the padding vec
+            # masked = [[0 if vec_sum == 0 else 1 for vec_sum in batch] for batch in tf.reduce_sum(v, axis=-1)]
+            masked = tf.map_fn(lambda batch: tf.map_fn(lambda x: 0 if x == 0.0 else 1, batch), tf.reduce_sum(v, axis=-1))
+            bias = utils.get_padding_bias(masked)
             # scaled_dot_product
             with tf.variable_scope('scaled_dot_product'):
                 logits = tf.matmul(vs_q, vs_k, transpose_b=True)
-                #                 logits += bias
+                logits += bias
                 weights = tf.nn.softmax(logits, name="attention_softmax")
                 if self.is_training:
                     weights = tf.nn.dropout(weights, 1.0 - drop_out)
                 attention_output = tf.matmul(weights, vs_v)  # [batch_size, num_head, max_sequence_len, dim]
+                # [batch_size, max_sequence_len, num_head, dim]
+                attention_output = tf.transpose(attention_output, [0, 2, 1, 3])
 
         return attention_output
+
+    def _single_attention(self, v, k):
+        v_pro = tf.layers.dense(v, self.hidden_size, name='v', activation=tf.nn.tanh)
+        k_ext = tf.tile(k, [1, self.num_head])  # [batch_size, num_head * hidden_size]
+        k_ext = tf.reshape(k_ext, [self.batch_size, self.num_head, self.hidden_size])
+        att = tf.reduce_sum(tf.multiply(v_pro, k_ext), axis=-1)
+        att = tf.nn.softmax(att)    # [batch_size, num_head]
+        tf.summary.histogram('aspect_attention', att)
+        attention_output = tf.reduce_sum(v * tf.expand_dims(att, -1), 1)  # [batch_size, dim]
+
+        if self.is_training:
+            attention_output = tf.nn.dropout(attention_output, 1-self.drop_out)
+        return attention_output
+
+    @staticmethod
+    def _pooling(v):
+        return tf.reduce_max(v, axis=-3)
 
 
 def run_epoch(session, merged, model, data, train_op, flag, output_log):
@@ -178,15 +225,11 @@ def run_epoch(session, merged, model, data, train_op, flag, output_log):
     all_acc = np.zeros(PREDICT_STEPS + 1)
     all_tn = all_tp = all_fp = all_fn = 0
     state = session.run(model.initial_state)
-    for x, y, y_step, news, stockid in reader.news_iterator(data, model.batch_size, model.num_steps, model.max_num_news,
-                                                            flag):
+    for x, y, _, news, _ in reader.news_iterator(data, model.batch_size, model.num_steps,
+                                                 model.max_num_news, model.max_num_words, flag):
         cost, acc, summary, state, _, prediction = session.run(
-            [model.loss, model.acc, merged, model.final_state, train_op, model.prediction], {model.input_data: x,
-                                                                                             model.targets: y,
-                                                                                             model.step_targets: y_step,
-                                                                                             model.news: news,
-                                                                                             model.initial_state: state,
-                                                                                             model.stock_id: stockid})
+            [model.loss, model.acc, merged, model.final_state, train_op, model.prediction],
+            {model.input_data: x, model.targets: y, model.news_ph: news, model.initial_state: state})
         cnt += 1
         total_costs += cost
         total_auc += roc_auc_score(y.reshape(-1), prediction.reshape(-1))
@@ -218,8 +261,9 @@ def run_epoch(session, merged, model, data, train_op, flag, output_log):
 
 def main(_):
     train_data, valid_data, test_data = reader.news_raw_data()
+    word_table_init, vocab_size = reader.init_word_table()
     #     parameter_gen = tuning_parameter()
-    max_num_news, lr, batch_size, num_head, drop_out, num_steps = 10, 0.01, 32, 4, 0.0, 10
+    max_num_news, max_num_words, lr, batch_size, num_head, drop_out, num_steps = 10, 10, 0.01, 32, 4, 0.3, 10
     #     while True:
     #         try:
     #             max_num_news, lr, batch_size, num_head, drop_out, num_steps = next(parameter_gen)
@@ -234,13 +278,13 @@ def main(_):
     with tf.name_scope("Train"):
         with tf.variable_scope("StockMovementPrediction", reuse=None, initializer=initializer):
             train_model = StockMovementPrediction(True, batch_size, num_steps, LINEAR_DIM, num_head, drop_out,
-                                                  max_num_news, lr)
+                                                  max_num_news, max_num_words, lr, vocab_size)
     saver = tf.train.Saver()
     writer = tf.summary.FileWriter("tensorboard/", tf.Session().graph)
     merged = tf.summary.merge_all()
     gpu_options = tf.GPUOptions(allow_growth=True)
     with tf.Session(config=tf.ConfigProto(gpu_options=gpu_options)) as session:
-        session.run(tf.initializers.global_variables())
+        session.run(tf.initializers.global_variables(), feed_dict={train_model.word_table_init: word_table_init})
         total_parameters = 0
         for variable in tf.trainable_variables():
             shape = variable.get_shape()
