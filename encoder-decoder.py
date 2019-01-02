@@ -6,12 +6,14 @@ import tensorflow as tf
 from tensorflow.python.layers import core as layers_core
 import logging.config
 import sys
-from sklearn.metrics import confusion_matrix
-from sklearn.metrics import roc_auc_score
-import math
+from sklearn.metrics import matthews_corrcoef
+from sklearn.metrics import roc_auc_score, accuracy_score
+import os
 import numpy as np
 import reader
 import utils
+
+CUDA_VISIBLE_DEVICES = 1
 
 info = ""
 logger = logging.getLogger('my_logger')
@@ -25,11 +27,12 @@ console_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
+root_path = 'data/tweet/file'
 EMBEDDING_DIM = 50
 HIDDEN_SIZE = 64
 NUM_LAYERS = 1
 NUM_CLASS = 2
-PREDICT_STEPS = 5
+PREDICT_STEPS = 1
 MAX_GRAD_NORM = 15
 NUM_EPOCH = 50
 LINEAR_DIM = 64
@@ -71,17 +74,15 @@ class StockMovementPrediction(object):
                 self.news = tf.nn.embedding_lookup(word_table, self.news_ph, name='news_word_embeds')
 
         logger.info(
-            f"embedding_size:{EMBEDDING_DIM}, max_num_news:{self.max_num_news},lr:{self.lr}, "
-            f"batch_size:{self.batch_size}, num_head:{self.num_head}, drop_out:{self.drop_out}, num_step:{self.num_steps}")
+            f"embedding_size:{EMBEDDING_DIM}, max_num_news:{self.max_num_news}, max_num_words:{self.max_num_words},"
+            f" lr:{self.lr}, batch_size:{self.batch_size}, num_head:{self.num_head}, drop_out:{self.drop_out},"
+            f" num_step:{self.num_steps}")
 
         outputs = self.encode()
         logits = self.decode(outputs, self.final_state)
         with tf.name_scope("loss_function"):
             self.loss = tf.losses.sparse_softmax_cross_entropy(labels=self.targets, logits=logits)
             self.prediction = tf.argmax(logits, -1)
-            result = tf.cast(tf.equal(self.prediction, self.targets), tf.float32)
-            self.acc = [tf.reduce_mean(result[:, ind]) for ind in range(PREDICT_STEPS)]
-            self.acc += [tf.reduce_mean(result)]
 
         if not self.is_training:
             return
@@ -213,97 +214,104 @@ class StockMovementPrediction(object):
 
 
 def run_epoch(session, merged, model, data, train_op, flag, output_log):
-    total_costs = 0.0
+    total_costs = []
     iters = 0
-    cnt = 0
-    total_auc = 0
-    all_acc = np.zeros(PREDICT_STEPS + 1)
-    all_tn = all_tp = all_fp = all_fn = 0
+    total_auc = []
+    all_acc = [[] for _ in range(PREDICT_STEPS+1)]
+    mcc = []
     state = session.run(model.initial_state)
     for x, y, _, news, _ in reader.news_iterator(data, model.batch_size, model.num_steps,
                                                  model.max_num_news, model.max_num_words, flag):
-        cost, acc, summary, state, _, prediction = session.run(
-            [model.loss, model.acc, merged, model.final_state, train_op, model.prediction],
+        cost, summary, state, _, prediction = session.run(
+            [model.loss, merged, model.final_state, train_op, model.prediction],
             {model.input_data: x, model.targets: y, model.news_ph: news, model.initial_state: state})
-        cnt += 1
-        total_costs += cost
-        total_auc += roc_auc_score(y.reshape(-1), prediction.reshape(-1))
+        total_costs.append(cost)
+        total_auc.append(roc_auc_score(y.reshape(-1), prediction.reshape(-1)))
         iters += model.num_steps
-        for i in range(PREDICT_STEPS + 1):
-            all_acc[i] += acc[i]
-        tn, fp, fn, tp = confusion_matrix(y_true=y.reshape(-1), y_pred=prediction.reshape(-1)).ravel()
-        all_tn += tn
-        all_fp += fp
-        all_fn += fn
-        all_tp += tp
-        mcc = (all_tp * all_tn - all_fp * all_fn) / math.sqrt(
-            (all_tp + all_fp) * (all_tp + all_fn) * (all_tn + all_fp) * (all_tn + all_fn))
-        if output_log and iters % 100 == 0:
+        for i in range(PREDICT_STEPS):
+            all_acc[i].append(accuracy_score(prediction[:, i], y[:, i]))
+        all_acc[-1].append(accuracy_score(prediction.reshape(-1), y.reshape(-1)))
+        mcc.append(matthews_corrcoef(y_true=y.reshape(-1), y_pred=prediction.reshape(-1)))
+        if output_log and iters % 500 == 0:
             logger.info("After %d steps, cost is %.5f acc %.5f auc %.5f mcc %.5f" % (
-            iters, cost, all_acc[0] / cnt, total_auc / cnt, mcc))
+                iters, np.mean(total_costs), np.mean(all_acc[0]), np.mean(total_auc), np.mean(mcc)))
+            if iters % 2000 == 0:
+                print(f"prediction {prediction}, label {y}")
 
-    return total_costs / cnt, all_acc / cnt, summary, total_auc / cnt
+    return np.mean(total_costs), np.mean(all_acc, axis=1), summary, np.mean(total_auc), np.mean(mcc)
 
 
-# def tuning_parameter():
-#     for batch_size in [4, 8, 16, 32]:
-#         for num_head in [3, 5, 8]:
-#             for max_num_news in [30, 20, 10]:
-#                 for lr in [0.1, 0.01, 0.001]:
-#                     for drop_out in [0.3, 0.5, 0.1]:
-#                         for num_step in [10, 15, 20, 5]:
-#                             yield max_num_news, lr, batch_size, num_head, drop_out, num_step
+def tuning_parameter():
+    for batch_size in [4, 8, 16, 32]:
+        for num_head in [4, 8, 2]:
+            for max_num_news in [30, 20, 10]:
+                for max_num_words in [40, 20, 20, 10]:
+                    for lr in [0.1, 0.01, 0.001]:
+                        for drop_out in [0.3, 0.5, 0.1]:
+                            for num_step in [10, 15, 20, 5]:
+                                yield max_num_news, max_num_words, lr, batch_size, num_head, drop_out, num_step
+
 
 def main(_):
     train_data, valid_data, test_data = reader.news_raw_data()
     word_table_init, vocab_size = reader.init_word_table()
-    #     parameter_gen = tuning_parameter()
-    max_num_news, max_num_words, lr, batch_size, num_head, drop_out, num_steps = 10, 10, 0.001, 32, 4, 0.0, 10
-    #     while True:
-    #         try:
-    #             max_num_news, lr, batch_size, num_head, drop_out, num_steps = next(parameter_gen)
-    #         except:
-    #             break
-    initializer = tf.random_uniform_initializer(-0.01, 0.01)
-    #     tf.reset_default_graph()
-    #     if os.path.exists(os.path.join(root_path, DATA_PATH, f"{info}train_preprocess.pkl")):
-    #         os.remove(os.path.join(root_path, DATA_PATH, f'{info}train_preprocess.pkl'))
-    #         os.remove(os.path.join(root_path, DATA_PATH, f'{info}valid_preprocess.pkl'))
-    #         os.remove(os.path.join(root_path, DATA_PATH, f'{info}test_preprocess.pkl'))
-    with tf.name_scope("Train"):
-        with tf.variable_scope("StockMovementPrediction", reuse=None, initializer=initializer):
-            train_model = StockMovementPrediction(True, batch_size, num_steps, LINEAR_DIM, num_head, drop_out,
-                                                  max_num_news, max_num_words, lr, vocab_size)
-    saver = tf.train.Saver()
-    writer = tf.summary.FileWriter("tensorboard/", tf.Session().graph)
-    merged = tf.summary.merge_all()
-    gpu_options = tf.GPUOptions(allow_growth=True)
-    with tf.Session(config=tf.ConfigProto(gpu_options=gpu_options)) as session:
-        session.run(tf.initializers.global_variables(), feed_dict={train_model.word_table_init: word_table_init})
-        total_parameters = 0
-        for variable in tf.trainable_variables():
-            shape = variable.get_shape()
-            variable_parameters = 1
-            for dim in shape:
-                variable_parameters += dim.value
-            total_parameters += variable_parameters
-        logger.info("total parameters: %d", total_parameters)
-        for i in range(NUM_EPOCH):
-            logger.info("In iteration: %d" % (i + 1))
-            train_cost, acc, summary, auc = run_epoch(session, merged, train_model, train_data, train_model.train_op,
-                                                      'train', True)
-            logger.info("Epoch: %d Training average Cost: %.5f auc is %.5f" % (i + 1, train_cost, auc))
-            writer.add_summary(summary, i)
-            valid_cost, acc, _, auc = run_epoch(session, merged, train_model, valid_data, tf.no_op(), 'valid', False)
-            logger.info("Epoch: %d Validation Cost: %.5f, auc is %.5f" % (i + 1, valid_cost, auc))
+    parameter_gen = tuning_parameter()
+    while True:
+        try:
+            max_num_news, max_num_words, lr, batch_size, num_head, drop_out, num_steps = next(parameter_gen)
+        except StopIteration:
+            break
+        initializer = tf.random_uniform_initializer(-0.01, 0.01)
+        tf.reset_default_graph()
+        if os.path.exists(os.path.join(root_path, f"{info}train_preprocess.pkl")):
+            os.remove(os.path.join(root_path, f'{info}train_preprocess.pkl'))
+        if os.path.exists(os.path.join(root_path, f"{info}valid_preprocess.pkl")):
+            os.remove(os.path.join(root_path, f'{info}valid_preprocess.pkl'))
+        if os.path.exists(os.path.join(root_path, f"{info}test_preprocess.pkl")):
+            os.remove(os.path.join(root_path, f'{info}test_preprocess.pkl'))
+        with tf.name_scope("Train"):
+            with tf.variable_scope("StockMovementPrediction", reuse=None, initializer=initializer):
+                train_model = StockMovementPrediction(True, batch_size, num_steps, LINEAR_DIM, num_head, drop_out,
+                                                      max_num_news, max_num_words, lr, vocab_size)
+        saver = tf.train.Saver()
+        sum_path = 'tensorboard/%smodel_batch%d_h%d_d%.2f_step%d_news%d_words%d_lr%.5f' % \
+                    (info, batch_size, num_head, drop_out, num_steps, max_num_news, max_num_words, lr)
+
+        writer = tf.summary.FileWriter(sum_path, tf.Session().graph)
+        merged = tf.summary.merge_all()
+        config = tf.ConfigProto()
+        # config.gpu_options.allow_growth = True
+        config.gpu_options.per_process_gpu_memory_fraction = 0.3
+        with tf.Session(config=config) as session:
+            session.run(tf.initializers.global_variables(), feed_dict={train_model.word_table_init: word_table_init})
+            total_parameters = 0
+            for variable in tf.trainable_variables():
+                shape = variable.get_shape()
+                variable_parameters = 1
+                for dim in shape:
+                    variable_parameters += dim.value
+                total_parameters += variable_parameters
+            logger.info("total parameters: %d", total_parameters)
+            for i in range(NUM_EPOCH):
+                logger.info("In iteration: %d" % (i + 1))
+                train_cost, acc, summary, auc, mcc = run_epoch(session, merged, train_model, train_data,
+                                                               train_model.train_op, 'train', True)
+                logger.info("Epoch: %d Training average Cost: %.5f auc is %.5f, mcc is %.5f" %
+                            (i + 1, train_cost, auc, mcc))
+                writer.add_summary(summary, i)
+                valid_cost, acc, _, auc, mcc = run_epoch(session, merged, train_model, valid_data,
+                                                         tf.no_op(), 'valid', False)
+                logger.info("Epoch: %d Validation Cost: %.5f, auc is %.5f mcc is %.5f" %
+                            (i + 1, valid_cost, auc, mcc))
+                for i in range(PREDICT_STEPS + 1):
+                    logger.info("predict step %d acc: %.5f", i, acc[i])
+            test_cost, acc, _, auc, mcc = run_epoch(session, merged, train_model, test_data,
+                                                    tf.no_op(), 'test', False)
+            logger.info("Test Cost: %.3f, auc is %.5f, mcc is %.5f" % (test_cost, auc, mcc))
             for i in range(PREDICT_STEPS + 1):
                 logger.info("predict step %d acc: %.5f", i, acc[i])
-        test_cost, acc, _, auc = run_epoch(session, merged, train_model, test_data, tf.no_op(), 'test', False)
-        logger.info("Test Cost: %.3f, auc is %.5f" % (test_cost, auc))
-        for i in range(PREDICT_STEPS + 1):
-            logger.info("predict step %d acc: %.5f", i, acc[i])
-        saver.save(session,
-                   f'model_saver/{info}model_btch{batch_size}_h{num_head}_d{drop_out}_step{num_steps}_news{max_num_news}_lr{lr}.ckpt')
+            saver.save(session, 'model_saver/%smodel_batch%d_h%d_d%.2f_step%d_news%d_words%d_lr%.5f.ckpt' %
+                       (info, batch_size, num_head, drop_out, num_steps, max_num_news, max_num_words, lr))
 
 
 if __name__ == "__main__":
