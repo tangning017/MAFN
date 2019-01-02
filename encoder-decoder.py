@@ -4,9 +4,6 @@ from __future__ import print_function
 
 import tensorflow as tf
 from tensorflow.python.layers import core as layers_core
-import os
-import datetime
-import logging
 import logging.config
 import sys
 from sklearn.metrics import confusion_matrix
@@ -108,26 +105,23 @@ class StockMovementPrediction(object):
         outputs = []
         state = self.initial_state
 
-        with tf.variable_scope("encoder"):
+        with tf.variable_scope("encoder", reuse=tf.AUTO_REUSE):
             for time_step in range(self.num_steps):
-                if time_step > 0:
-                    tf.get_variable_scope().reuse_variables()
                 with tf.variable_scope("word_level_self_attention", reuse=tf.AUTO_REUSE):
-                    news = []
+                    daily_news = []
                     for news_num in range(self.max_num_news):
                         # [batch_size, max_sequence, num_head, embedding]
                         one_news = self._multi_head_self_attention(self.news[:, time_step, news_num, :, :],
                                                                    self.num_head, self.linear_dim, self.drop_out)
-                        pooled_news = self._pooling(one_news)   # [batch_size, num_head, embedding]
-                        pooled_news = tf.reshape(pooled_news, [self.batch_size, self.num_head*EMBEDDING_DIM])  #[batch_size, num_head*embedding]
-                        news.append(pooled_news)
-                    news = tf.transpose(news, [1, 0, 2])    # [batch_size, max_num_news, num_head*embedding]
+                        att_one_news = tf.reshape(one_news,
+                                                 [self.batch_size, self.linear_dim])  # [batch_size, linear_dim]
+                        daily_news.append(att_one_news)
+                    daily_news = tf.transpose(daily_news, [1, 0, 2])    # [batch_size, max_num_news, linear_dim]
                 with tf.variable_scope('news_level_self_attention', reuse=tf.AUTO_REUSE):
-                    news = self._multi_head_self_attention(news, self.num_head, self.linear_dim, self.drop_out)
-                    pooled_news = self._pooling(news)   # [batch_size, num_head, embedding]
-                    att_news = self._single_attention(pooled_news, state[0].h)
+                    daily_news = self._multi_head_self_attention(daily_news, self.num_head, self.linear_dim, self.drop_out)
+                    att_daily_news = self._single_attention(daily_news, state[0].h)
 
-                lstm_input = tf.concat([self.input_data[:, time_step, :], att_news], -1)
+                lstm_input = tf.concat([self.input_data[:, time_step, :], att_daily_news], -1)
                 cell_output, state = cell(lstm_input, state)
                 outputs.append(cell_output)
         self.final_state = state
@@ -140,7 +134,7 @@ class StockMovementPrediction(object):
         state: final hidden states of encoder
         return the predicted logits
         """
-        with tf.variable_scope("RNN_decoder"):
+        with tf.variable_scope("decoder"):
             # [batch_size, max_time, num_units]
             attention_states = tf.transpose(encode, [1, 0, 2])
             attention_mechanism = tf.contrib.seq2seq.LuongAttention(self.hidden_size, attention_states)
@@ -179,12 +173,12 @@ class StockMovementPrediction(object):
                 vs_q = split_last_dimension_then_transpose(vp_q, num_head, dim // num_head)
                 vs_k = split_last_dimension_then_transpose(vp_k, num_head, dim // num_head)
                 vs_v = split_last_dimension_then_transpose(vp_v, num_head, dim // num_head)
-            #             depth = dim // num_head
-            #             vs_q *= depth ** -0.5
+            depth = dim // num_head
+            vs_q *= depth ** -0.5
 
             # mask the padding vec
             # masked = [[0 if vec_sum == 0 else 1 for vec_sum in batch] for batch in tf.reduce_sum(v, axis=-1)]
-            masked = tf.map_fn(lambda batch: tf.map_fn(lambda x: 0 if x == 0.0 else 1, batch), tf.reduce_sum(v, axis=-1))
+            masked = tf.map_fn(lambda batch: tf.map_fn(lambda x: 0.0 if x == 0.0 else 1.0, batch), tf.reduce_sum(v, axis=-1))
             bias = utils.get_padding_bias(masked)
             # scaled_dot_product
             with tf.variable_scope('scaled_dot_product'):
@@ -196,8 +190,9 @@ class StockMovementPrediction(object):
                 attention_output = tf.matmul(weights, vs_v)  # [batch_size, num_head, max_sequence_len, dim]
                 # [batch_size, max_sequence_len, num_head, dim]
                 attention_output = tf.transpose(attention_output, [0, 2, 1, 3])
+        pooled = self._pooling(attention_output)  # [batch_size, num_head, linear_dim//num_head]
 
-        return attention_output
+        return pooled
 
     def _single_attention(self, v, k):
         v_pro = tf.layers.dense(v, self.hidden_size, name='v', activation=tf.nn.tanh)
@@ -263,13 +258,13 @@ def main(_):
     train_data, valid_data, test_data = reader.news_raw_data()
     word_table_init, vocab_size = reader.init_word_table()
     #     parameter_gen = tuning_parameter()
-    max_num_news, max_num_words, lr, batch_size, num_head, drop_out, num_steps = 10, 10, 0.01, 32, 4, 0.3, 10
+    max_num_news, max_num_words, lr, batch_size, num_head, drop_out, num_steps = 10, 10, 0.001, 32, 4, 0.0, 10
     #     while True:
     #         try:
     #             max_num_news, lr, batch_size, num_head, drop_out, num_steps = next(parameter_gen)
     #         except:
     #             break
-    initializer = tf.contrib.layers.variance_scaling_initializer(factor=1.0, mode='FAN_IN')
+    initializer = tf.random_uniform_initializer(-0.01, 0.01)
     #     tf.reset_default_graph()
     #     if os.path.exists(os.path.join(root_path, DATA_PATH, f"{info}train_preprocess.pkl")):
     #         os.remove(os.path.join(root_path, DATA_PATH, f'{info}train_preprocess.pkl'))
