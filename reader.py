@@ -1,5 +1,4 @@
 import numpy as np
-# import matplotlib.pyplot as plt
 import os
 import pandas as pd
 import pickle
@@ -33,6 +32,14 @@ testing_end_date = 20160101
 info = 'tweets'
 
 TRAIN = 'train'
+
+class Preprocess_data(object):
+    def __init__(self, x_all, y_all, y_step_all, news_all, stock_id):
+        self.x_all = x_all
+        self.y_all = y_all
+        self.y_step_all = y_step_all
+        self.news_all = news_all
+        self.stock_id = stock_id
 
 
 def init_word_table():
@@ -116,6 +123,9 @@ def news_iterator(data, batch_size, num_step, max_news_sequence, max_word_sequen
                 y_step_all += [y_step]
                 news_all += [news]
                 stock_id += [i]
+        preprocess_data = Preprocess_data(x_all, y_all, y_step_all, news_all, stock_id)
+        pickle.dump(preprocess_data, open(preprocess_path, 'wb'))
+
     for batch in range(len(x_all)//batch_size):
         indices = list(range(len(x_all)))
         if flag == TRAIN:
@@ -204,5 +214,5 @@ if __name__ == "__main__":
 #     x, y, news = news_iterator(testing_data, 32, 10, 10)
 #     print(x.shape, y.shape, news.shape)
     print(len(training_data[0]))
-    for a, b, c, d, f in news_iterator(testing_data, 2, 5, 3, 5, 'test'):
+    for a, b, c, d, f in news_iterator(training_data, 32, 10, 10, 10, 'train'):
         print(a.shape, b.shape, c.shape, d.shape)
