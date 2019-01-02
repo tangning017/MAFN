@@ -32,7 +32,7 @@ EMBEDDING_DIM = 50
 HIDDEN_SIZE = 64
 NUM_LAYERS = 1
 NUM_CLASS = 2
-PREDICT_STEPS = 1
+PREDICT_STEPS = 5
 MAX_GRAD_NORM = 15
 NUM_EPOCH = 50
 LINEAR_DIM = 64
@@ -97,10 +97,10 @@ class StockMovementPrediction(object):
         """
         :return:
         """
-        lstm_cell = tf.contrib.rnn.LayerNormBasicLSTMCell(self.hidden_size)
+        encoder_cell = tf.contrib.rnn.LayerNormBasicLSTMCell(self.hidden_size)
         if self.is_training:
-            lstm_cell = tf.contrib.rnn.LayerNormBasicLSTMCell(self.hidden_size, dropout_keep_prob=1 - self.drop_out)
-        cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * NUM_LAYERS)
+            encoder_cell = tf.contrib.rnn.LayerNormBasicLSTMCell(self.hidden_size, dropout_keep_prob=1 - self.drop_out)
+        cell = tf.nn.rnn_cell.MultiRNNCell([encoder_cell] * NUM_LAYERS)
         self.initial_state = cell.zero_state(self.batch_size, tf.float32)
 
         outputs = []
@@ -150,7 +150,7 @@ class StockMovementPrediction(object):
             helper = tf.contrib.seq2seq.TrainingHelper(encode, [PREDICT_STEPS for _ in range(self.batch_size)],
                                                        time_major=True)
             decoder_initial_state = decoder_cell.zero_state(self.batch_size, tf.float32).clone(cell_state=state[0])
-            projection_layer = layers_core.Dense(units=NUM_CLASS, use_bias=False)
+            projection_layer = layers_core.Dense(units=NUM_CLASS, use_bias=False, activation=tf.nn.sigmoid)
             decoder = tf.contrib.seq2seq.BasicDecoder(decoder_cell, helper, decoder_initial_state,
                                                       output_layer=projection_layer)
             outputs, _, _ = tf.contrib.seq2seq.dynamic_decode(decoder)
@@ -303,13 +303,13 @@ def main(_):
                                                          tf.no_op(), 'valid', False)
                 logger.info("Epoch: %d Validation Cost: %.5f, auc is %.5f mcc is %.5f" %
                             (i + 1, valid_cost, auc, mcc))
-                for i in range(PREDICT_STEPS + 1):
-                    logger.info("predict step %d acc: %.5f", i, acc[i])
+                for j in range(PREDICT_STEPS + 1):
+                    logger.info("predict step %d acc: %.5f", j, acc[j])
             test_cost, acc, _, auc, mcc = run_epoch(session, merged, train_model, test_data,
                                                     tf.no_op(), 'test', False)
             logger.info("Test Cost: %.3f, auc is %.5f, mcc is %.5f" % (test_cost, auc, mcc))
-            for i in range(PREDICT_STEPS + 1):
-                logger.info("predict step %d acc: %.5f", i, acc[i])
+            for j in range(PREDICT_STEPS + 1):
+                logger.info("predict step %d acc: %.5f", j, acc[j])
             saver.save(session, 'model_saver/%smodel_batch%d_h%d_d%.2f_step%d_news%d_words%d_lr%.5f.ckpt' %
                        (info, batch_size, num_head, drop_out, num_steps, max_num_news, max_num_words, lr))
 
