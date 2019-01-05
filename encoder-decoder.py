@@ -34,7 +34,7 @@ NUM_LAYERS = 1
 NUM_CLASS = 2
 PREDICT_STEPS = 5
 MAX_GRAD_NORM = 15
-NUM_EPOCH = 50
+NUM_EPOCH = 10
 LINEAR_DIM = 64
 DECAY_STEP = 10
 DECAY_RATE = 0.98
@@ -56,6 +56,7 @@ class StockMovementPrediction(object):
         self.max_num_words = max_num_words
         self.lr = lr
         self.hidden_size = HIDDEN_SIZE
+        self.attention_reg = 0
         self.final_state = None
         self.initial_state = None
 
@@ -81,7 +82,9 @@ class StockMovementPrediction(object):
         outputs = self.encode()
         logits = self.decode(outputs, self.final_state)
         with tf.name_scope("loss_function"):
-            self.loss = tf.losses.sparse_softmax_cross_entropy(labels=self.targets, logits=logits)
+            cross_entropy_loss = tf.losses.sparse_softmax_cross_entropy(labels=self.targets, logits=logits)
+            parameter_loss = tf.add_n([tf.nn.l2_loss(v) for v in vars if 'bias' not in v.name]) * 0.001
+            self.loss = (1-LAMBDA) * cross_entropy_loss + LAMBDA * (self.attention_reg + parameter_loss)
             self.prediction = tf.argmax(logits, -1)
 
         if not self.is_training:
@@ -121,9 +124,9 @@ class StockMovementPrediction(object):
                 with tf.variable_scope('news_level_self_attention', reuse=tf.AUTO_REUSE):
                     daily_news = self._multi_head_self_attention(daily_news, self.num_head, self.linear_dim, self.drop_out)
                     att_daily_news = self._single_attention(daily_news, state[0].h)
-
-                lstm_input = tf.concat([self.input_data[:, time_step, :], att_daily_news], -1)
-                cell_output, state = cell(lstm_input, state)
+                price = tf.layers.dense(self.input_data[:, time_step, :], self.linear_dim//self.num_head)
+                cell_input = tf.concat([price, att_daily_news], -1)
+                cell_output, state = cell(cell_input, state)
                 outputs.append(cell_output)
         self.final_state = state
         return outputs
@@ -186,6 +189,8 @@ class StockMovementPrediction(object):
                 logits = tf.matmul(vs_q, vs_k, transpose_b=True)
                 logits += bias
                 weights = tf.nn.softmax(logits, name="attention_softmax")
+                reg = tf.matmul(weights, weights, transpose_b=True) - tf.eye(num_head, batch_shape=[self.batch_size])
+                self.attention_reg += tf.reduce_sum(tf.norm(reg, axis=[1, 2]))
                 if self.is_training:
                     weights = tf.nn.dropout(weights, 1.0 - drop_out)
                 attention_output = tf.matmul(weights, vs_v)  # [batch_size, num_head, max_sequence_len, dim]
@@ -226,7 +231,10 @@ def run_epoch(session, merged, model, data, train_op, flag, output_log):
             [model.loss, merged, model.final_state, train_op, model.prediction],
             {model.input_data: x, model.targets: y, model.news_ph: news, model.initial_state: state})
         total_costs.append(cost)
-        total_auc.append(roc_auc_score(y.reshape(-1), prediction.reshape(-1)))
+        try:
+            total_auc.append(roc_auc_score(y_true=y.reshape(-1), y_score=prediction.reshape(-1)))
+        except ValueError:
+            print("auc error")
         iters += model.num_steps
         for i in range(PREDICT_STEPS):
             all_acc[i].append(accuracy_score(prediction[:, i], y[:, i]))
