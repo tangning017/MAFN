@@ -83,6 +83,7 @@ class StockMovementPrediction(object):
         logits = self.decode(outputs, self.final_state)
         with tf.name_scope("loss_function"):
             cross_entropy_loss = tf.losses.sparse_softmax_cross_entropy(labels=self.targets, logits=logits)
+            vars = tf.trainable_variables()
             parameter_loss = tf.add_n([tf.nn.l2_loss(v) for v in vars if 'bias' not in v.name]) * 0.001
             self.loss = (1-LAMBDA) * cross_entropy_loss + LAMBDA * (self.attention_reg + parameter_loss)
             self.prediction = tf.argmax(logits, -1)
@@ -189,13 +190,23 @@ class StockMovementPrediction(object):
                 logits = tf.matmul(vs_q, vs_k, transpose_b=True)
                 logits += bias
                 weights = tf.nn.softmax(logits, name="attention_softmax")
-                reg = tf.matmul(weights, weights, transpose_b=True) - tf.eye(num_head, batch_shape=[self.batch_size])
-                self.attention_reg += tf.reduce_sum(tf.norm(reg, axis=[1, 2]))
+
+                def add_multi_head_self_attention_reg(weights, batch_size, num_head):
+                    t_shape = weights.get_shape().as_list()
+                    # [batch_size, max_sequence_len, num_head, max_sequence_len]
+                    tensor = tf.transpose(weights, [0, 2, 1, 3])
+                    reg = tf.matmul(tensor, tensor, transpose_b=True) - \
+                        tf.eye(num_head, batch_shape=[batch_size, t_shape[-1]])
+                    return tf.reduce_sum(tf.norm(reg, axis=[-2, -1]))
+
+                self.attention_reg += add_multi_head_self_attention_reg(weights, self.batch_size, num_head)
+
                 if self.is_training:
                     weights = tf.nn.dropout(weights, 1.0 - drop_out)
                 attention_output = tf.matmul(weights, vs_v)  # [batch_size, num_head, max_sequence_len, dim]
                 # [batch_size, max_sequence_len, num_head, dim]
                 attention_output = tf.transpose(attention_output, [0, 2, 1, 3])
+
         pooled = self._pooling(attention_output)  # [batch_size, num_head, linear_dim//num_head]
 
         return pooled
@@ -250,13 +261,13 @@ def run_epoch(session, merged, model, data, train_op, flag, output_log):
 
 
 def tuning_parameter():
-    for batch_size in [4, 8, 16, 32]:
-        for num_head in [4, 8, 2]:
-            for max_num_news in [30, 20, 10]:
-                for max_num_words in [40, 20, 20, 10]:
-                    for lr in [0.1, 0.01, 0.001]:
-                        for drop_out in [0.3, 0.5, 0.1]:
-                            for num_step in [10, 15, 20, 5]:
+    for batch_size in [64]:
+        for num_head in [4]:
+            for max_num_news in [10]:
+                for max_num_words in [20]:
+                    for lr in [0.01]:
+                        for drop_out in [0.3]:
+                            for num_step in [10, 20]:
                                 yield max_num_news, max_num_words, lr, batch_size, num_head, drop_out, num_step
 
 

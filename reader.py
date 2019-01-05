@@ -33,6 +33,7 @@ info = 'tweets'
 
 TRAIN = 'train'
 
+
 class Preprocess_data(object):
     def __init__(self, x_all, y_all, y_step_all, news_all, stock_id):
         self.x_all = x_all
