@@ -22,7 +22,7 @@ root_path = 'data/tweet/file'
 vec_path = 'data/tweet'
 # feature_col = ['high', 'low', 'close']
 feature_col = ['High_rate', 'Low_rate', 'close']
-label_col = ['label', 'label2', 'label3', 'label4', 'label5']
+label_col = ['mv']
 # label_col = ['label']
 embed_size = 50
 training_begin_date = 20140101
@@ -144,7 +144,7 @@ def news_iterator(data, batch_size, num_step, max_news_sequence, max_word_sequen
             stock_id_batch += [stock_id[indices[i]]]
 #         print(news_batch)
         yield np.array(x_batch, dtype=np.float32),\
-            np.array(y_batch, dtype=np.int64),\
+            np.array(y_batch, dtype=np.float32),\
             np.array(y_step_batch, dtype=np.int64),\
             np.array(news_batch, dtype=np.int64),\
             np.array(stock_id_batch, dtype=np.int64)
@@ -168,7 +168,7 @@ def news_raw_data():
             df = pd.read_csv(os.path.join(root_path,file))
             df['mv'] = df['mv'].astype('float32')
             df['date'] = df['date'].astype('int64')
-            df = df[(df.mv<-0.005)|(df.mv>0.0055)]
+            # df = df[(df.mv<-0.005)|(df.mv>0.0055)]
             df = df.sort_values(by=['date'], ascending=True)
             ## each dataframe contains one stock
             training_prices += [df[(df.date>=training_begin_date)&(df.date<training_end_date)][feature_col].reset_index(drop=True)]
