@@ -5,13 +5,11 @@ from __future__ import print_function
 import tensorflow as tf
 import logging.config
 import sys
-import os
 import numpy as np
 import reader
-import utils
+from utils import eval_res
 
-
-info = "tweets"
+info = "newsandprice"
 logger = logging.getLogger('my_logger')
 logger.setLevel(logging.DEBUG)
 log_fp = '{0}.log'.format(f'{info}_model')
@@ -23,31 +21,31 @@ console_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
-root_path = "data/tweets/file/"
-EMBEDDING_DIM = 50
-HIDDEN_SIZE = 16
-NUM_LAYERS = 1
-NUM_CLASS = 1
-PREDICT_STEPS = 5
-NUM_EPOCH = 15
-LINEAR_DIM = 64
-DECAY_STEP = 10
-DECAY_RATE = 0.96
-STOCK_SIZE = 87
-FEATURE_NUM = 4
-
-# root_path = "data/news/file/"
-# EMBEDDING_DIM = 300
+# root_path = "data/tweets/file/"
+# EMBEDDING_DIM = 50
 # HIDDEN_SIZE = 16
 # NUM_LAYERS = 1
 # NUM_CLASS = 1
 # PREDICT_STEPS = 1
-# NUM_EPOCH = 15
+# NUM_EPOCH = 10
 # LINEAR_DIM = 64
 # DECAY_STEP = 10
 # DECAY_RATE = 0.96
-# STOCK_SIZE = 1071
-# FEATURE_NUM = 9
+# STOCK_SIZE = 87
+# FEATURE_NUM = 4
+
+root_path = "data/news/file/"
+EMBEDDING_DIM = 300
+HIDDEN_SIZE = 16
+NUM_LAYERS = 1
+NUM_CLASS = 1
+PREDICT_STEPS = 1
+NUM_EPOCH = 15
+LINEAR_DIM = 64
+DECAY_STEP = 10
+DECAY_RATE = 0.96
+STOCK_SIZE = 200
+FEATURE_NUM = 9
 
 
 class StockMovementPrediction(object):
@@ -81,6 +79,7 @@ class StockMovementPrediction(object):
             with tf.variable_scope('embeds'):
                 word_table = tf.get_variable('word_table', initializer=self.word_table_init, trainable=False)
                 self.news = tf.nn.embedding_lookup(word_table, self.news_ph, name='news_word_embeds')
+                self.news = tf.layers.dense(self.news, self.hidden_size, use_bias=False) # reduce the dimension of words
 
         logger.info(
             f"embedding_size:{EMBEDDING_DIM}, max_num_news:{self.max_num_news}, max_num_words:{self.max_num_words},"
@@ -92,6 +91,7 @@ class StockMovementPrediction(object):
         with tf.name_scope("loss_function"):
             self.mse_loss = tf.losses.mean_squared_error(labels=self.targets, predictions=tf.squeeze(logits))
             self.rmse_loss = tf.sqrt(self.mse_loss)
+            # self.cross_entropy = tf.losses.sparse_softmax_cross_entropy(labels=self.targets, logits=logits)
             trainable_vars = tf.trainable_variables()
             self.param_loss = self.param_lambda * tf.reduce_mean([tf.nn.l2_loss(v) for v in trainable_vars if 'bias' not in v.name])
             if len(self.attention_reg) == 0:
@@ -113,10 +113,7 @@ class StockMovementPrediction(object):
         """
         :return:
         """
-        # encoder_cell = tf.nn.rnn_cell.LSTMCell(self.hidden_size)
-        encoder_cell = tf.contrib.rnn.LayerNormBasicLSTMCell(self.hidden_size)
-        if self.is_training is not None:
-            encoder_cell = tf.contrib.rnn.LayerNormBasicLSTMCell(self.hidden_size, dropout_keep_prob=1 - self.drop_out)
+        encoder_cell = tf.contrib.rnn.LSTMCell(self.hidden_size)
         cell = tf.nn.rnn_cell.MultiRNNCell([encoder_cell] * NUM_LAYERS)
         self.initial_state = cell.zero_state(self.batch_size, tf.float32)
 
@@ -131,20 +128,21 @@ class StockMovementPrediction(object):
                         cell_fw = tf.nn.rnn_cell.LSTMCell(self.hidden_size)
                         cell_bw = tf.nn.rnn_cell.LSTMCell(self.hidden_size)
                         bioutput, _ = tf.nn.bidirectional_dynamic_rnn(
-                            cell_fw, cell_bw, self.news[:, time_step, num_news, :, :],
-                            dtype=tf.float32, time_major=False)
+                        cell_fw, cell_bw, self.news[:, time_step, num_news, :, :], dtype=tf.float32, time_major=False)
                         bilstm_output = (bioutput[0] + bioutput[1]) / 2
                         bilstm_output = tf.reduce_mean(bilstm_output, axis=-2)
                         daily_news.append(bilstm_output)
-                daily_news = tf.transpose(daily_news, [1, 0, 2])
+                    daily_news = tf.transpose(daily_news, [1, 0, 2])
                 with tf.variable_scope('news_level_attention', reuse=tf.AUTO_REUSE):
-                    att_daily_news = self._multi_head_single_attention(daily_news, self.num_head, self.linear_dim)
+                    att_daily_news = self._multi_head_transform(daily_news, self.num_head, self.linear_dim)
                 with tf.variable_scope("aspect_level_attention", reuse=tf.AUTO_REUSE):
                     att_daily_aspect, alpha = self._single_attention(att_daily_news, state[0].h)
                 price = self.input_data[:, time_step, :]
                 cell_input = tf.concat([price, att_daily_aspect], axis=-1)
                 # cell_input = att_daily_aspect
-                # cell_input = tf.contrib.layers.batch_norm(cell_input)
+                cell_input = tf.contrib.layers.batch_norm(cell_input)
+                if self.is_training is not None:
+                    cell_input = tf.layers.dropout(cell_input, rate=self.drop_out)
                 cell_output, state = cell(cell_input, state)
                 outputs.append(cell_output)
         self.final_state = state
@@ -162,11 +160,7 @@ class StockMovementPrediction(object):
             attention_states = tf.transpose(encode, [1, 0, 2])
             attention_mechanism = tf.contrib.seq2seq.LuongAttention(self.hidden_size, attention_states)
 
-            # decoder_cell = tf.nn.rnn_cell.LSTMCell(self.hidden_size)
-            decoder_cell = tf.contrib.rnn.LayerNormBasicLSTMCell(self.hidden_size)
-            if self.is_training is not None:
-                decoder_cell = tf.contrib.rnn.LayerNormBasicLSTMCell(self.hidden_size,
-                                                                     dropout_keep_prob=1 - self.drop_out)
+            decoder_cell = tf.contrib.rnn.LSTMCell(self.hidden_size)
             decoder_cell = tf.contrib.seq2seq.AttentionWrapper(decoder_cell, attention_mechanism,
                                                                attention_layer_size=self.hidden_size)
 
@@ -175,11 +169,15 @@ class StockMovementPrediction(object):
             decoder_initial_state = decoder_cell.zero_state(self.batch_size, tf.float32).clone(cell_state=state[0])
             decoder = tf.contrib.seq2seq.BasicDecoder(decoder_cell, helper, decoder_initial_state)
             outputs, _, _ = tf.contrib.seq2seq.dynamic_decode(decoder)
-            logits = outputs.rnn_output
-            logits = tf.layers.dense(logits, NUM_CLASS)
+            outputs = outputs.rnn_output
+            outputs = tf.contrib.layers.batch_norm(outputs)
+            if self.is_training is not None:
+                outputs = tf.layers.dropout(outputs, rate=self.drop_out)
+            logits = tf.layers.dense(outputs, NUM_CLASS)
         return logits
 
-    def _multi_head_single_attention(self, v, num_head, dim):
+    @staticmethod
+    def _multi_head_transform(v, num_head, dim):
         with tf.name_scope('multi_head_single_attention'):
             # linear projection
             with tf.variable_scope('linear_projection'):
@@ -193,34 +191,18 @@ class StockMovementPrediction(object):
 
                 vs_q = split_last_dimension_then_transpose(vp, num_head, dim // num_head)
 
-            # mask the padding vec
-            # masked = [[0 if vec_sum == 0 else 1 for vec_sum in batch] for batch in tf.reduce_sum(v, axis=-1)]
-            masked = tf.map_fn(lambda batch: tf.map_fn(lambda x: 0.0 if x == 0.0 else 1.0, batch),
-                               tf.reduce_sum(v, axis=-1))
-            bias = tf.squeeze(utils.get_padding_bias(masked))
-            multi_heads_output = []
-            head_alpha = []
-            for head in range(num_head):
-                memory = vs_q[:, head, :, :]
-                att_vec = tf.reduce_mean(vs_q[:, head, :, :], axis=-2)
-                one_head, alpha = self._single_attention(memory, att_vec, bias)
-                multi_heads_output.append(one_head)
-                head_alpha.append(alpha)
-            head_alpha = tf.transpose(head_alpha, [1, 0, 2])
-            self.attention_reg.append(tf.norm(tf.matmul(head_alpha, head_alpha, transpose_b=True) -
-                                      tf.eye(num_head, batch_shape=[self.batch_size])))
-        return tf.transpose(multi_heads_output, [1, 0, 2])  # [batch_size, num_head, dim]
+            multi_heads_output = tf.reduce_max(vs_q, axis=-2)
+        return multi_heads_output
 
     @staticmethod
-    def _single_attention(v, k, bias=None):
+    def _single_attention(v, k):
         seq_len = v.get_shape().as_list()[-2]
         hidden_dim = k.get_shape().as_list()[-1]
         v_pro = tf.layers.dense(v, hidden_dim, use_bias=False, activation=tf.nn.tanh)
         k_ext = tf.tile(k, [1, seq_len])  # [batch_size, seq_len * hidden_dim]
         k_ext = tf.reshape(k_ext, [-1, seq_len, hidden_dim])
         att = tf.reduce_sum(tf.multiply(v_pro, k_ext), axis=-1)
-        if bias is not None:
-            att += bias
+
         att = tf.nn.softmax(att)    # [batch_size, seq_len]
         tf.summary.histogram('aspect_attention', att)
         attention_output = tf.reduce_sum(v * tf.expand_dims(att, -1), -2)  # [batch_size, dim]
@@ -235,12 +217,13 @@ def run_epoch(session, merged, model, data, flag, output_log):
     total_costs = []
     att_costs = []
     param_costs = []
-    total_rmse = []
     state = session.run(model.initial_state)
+    predictions = []
+    ys = []
     iters = 0
     for x, y, _, news, _ in reader.news_iterator(data, model.batch_size, model.num_steps,
                                                  model.max_num_news, model.max_num_words, flag):
-        fetch = [model.loss, model.rmse_loss, model.att_loss, model.param_loss,
+        fetch = [model.loss, model.att_loss, model.param_loss,
                  model.final_state, merged, model.prediction]
         feed_dict = {model.input_data: x, model.targets: y, model.news_ph: news, model.initial_state: state}
         if flag == 'train':
@@ -248,38 +231,30 @@ def run_epoch(session, merged, model, data, flag, output_log):
             fetch.append(model.train_op)
         else:
             fetch.append(tf.no_op())
-        cost, rmse, att_loss, param_loss, state, summary, prediction, _ = session.run(fetch, feed_dict)
-        total_rmse.append(rmse)
+
+        cost, att_loss, param_loss, state, summary, prediction, _ = session.run(fetch, feed_dict)
         total_costs.append(cost)
         att_costs.append(att_loss)
         param_costs.append(param_loss)
         iters += model.num_steps
-        if output_log and iters % 40 == 0:
-            logger.info("After %d steps, cost is %.5f att cost is %.5f param cost is %.5f"
-                        " rmse is %.5f " % (iters, cost, att_loss, param_loss, rmse))
+        if output_log and iters % 1000 == 0:
+            logger.info(f"cost {cost}, att {att_loss}, param {param_loss}, {eval_res(y, prediction)}")
             sum_path = f'tensorboard/{flag}/%smodel_batch%d_h%d_d%.2f_step%d_news%d_words%d_lr%.5f'\
                        % (info, model.batch_size, model.num_head, model.drop_out, model.num_steps,
                           model.max_num_news, model.max_num_words, model.lr)
             writer = tf.summary.FileWriter(sum_path, tf.Session().graph)
             writer.add_summary(summary, iters)
-
-    # print(f"prediction {prediction}, label {y}")
-
-    return np.mean(total_costs), np.mean(att_costs), np.mean(param_costs), np.mean(total_rmse)
+        predictions.append(prediction)
+        ys.append(y)
+    return np.mean(total_costs), np.mean(att_costs), np.mean(param_costs), eval_res(predictions, ys)
 
 
 def tuning_parameter():
-    # for max_num_news in [10]:
-    #     for max_num_words in [20]:
-    #         for lr in [0.01]:
-    #             for drop_out in [0.3]:
-    # for batch_size in [64]:
-    #     for num_head in [4]:
     for num_step in [10]:
         for att_lambda in [0.001]:
             for param_lambda in [0.001]:
-                for lr in [0.0001]:
-                    yield 10, 10, lr, 32, 4, 0.0, num_step, att_lambda, param_lambda
+                for lr in [0.001]:
+                    yield 10, 10, lr, 64, 4, 0.3, num_step, att_lambda, param_lambda
 
 
 def main(_):
@@ -294,12 +269,12 @@ def main(_):
             break
         initializer = tf.contrib.layers.xavier_initializer()
         tf.reset_default_graph()
-        if os.path.exists(os.path.join(root_path, f"{info}train_preprocess.pkl")):
-            os.remove(os.path.join(root_path, f'{info}train_preprocess.pkl'))
-        if os.path.exists(os.path.join(root_path, f"{info}valid_preprocess.pkl")):
-            os.remove(os.path.join(root_path, f'{info}valid_preprocess.pkl'))
-        if os.path.exists(os.path.join(root_path, f"{info}test_preprocess.pkl")):
-            os.remove(os.path.join(root_path, f'{info}test_preprocess.pkl'))
+       # if os.path.exists(os.path.join(root_path, f"{info}train_preprocess.pkl")):
+       #     os.remove(os.path.join(root_path, f'{info}train_preprocess.pkl'))
+       # if os.path.exists(os.path.join(root_path, f"{info}valid_preprocess.pkl")):
+       #     os.remove(os.path.join(root_path, f'{info}valid_preprocess.pkl'))
+       # if os.path.exists(os.path.join(root_path, f"{info}test_preprocess.pkl")):
+       #     os.remove(os.path.join(root_path, f'{info}test_preprocess.pkl'))
         with tf.name_scope("Train"):
             with tf.variable_scope("StockMovementPrediction", reuse=None, initializer=initializer):
                 model = StockMovementPrediction(batch_size, num_steps,
@@ -309,6 +284,9 @@ def main(_):
         merged = tf.summary.merge_all()
         config = tf.ConfigProto()
         config.gpu_options.allow_growth = True
+        valid_mse = 1
+        valid_acc = 0
+        flag_cnt = 0
         with tf.Session(config=config) as session:
             init = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
             session.run(init, feed_dict={model.word_table_init: word_table_init})
@@ -321,19 +299,31 @@ def main(_):
                 total_parameters += variable_parameters
             logger.info("total parameters: %d", total_parameters)
             for i in range(NUM_EPOCH):
-                logger.info("In iteration: %d" % (i + 1))
-                train_cost, att_cost, param_cost, rmse = \
+                train_cost, att_cost, param_cost, eval = \
                     run_epoch(session, merged, model, train_data, 'train', True)
-                logger.info("Epoch: %d Training average Cost: %.5f %.5f %.5f %.5f" %
-                            (i + 1, train_cost, att_cost, param_cost, rmse))
-                valid_cost, att_cost, param_cost, rmse = \
+                logger.info(logger.info(f"Epoch {i+1} train_cost {train_cost},"
+                                        f" att {att_cost}, param {param_cost}, {eval}"))
+                valid_cost, att_cost, param_cost, eval = \
                     run_epoch(session, merged, model, valid_data, 'valid', False)
-                logger.info("Epoch: %d Validation Cost: %.5f %.5f %.5f %.5f" %
-                            (i + 1, valid_cost, att_cost, param_cost, rmse))
+                logger.info(
+                    logger.info(f"Epoch {i + 1} valid_cost {valid_cost},"
+                                f" att {att_cost}, param {param_cost}, {eval}"))
+                if eval['mse'] > valid_mse or eval['acc'] > valid_acc:
+                    saver.save(session, 'model_saver/%smodel_batch%d_h%d_d%.2f_step%d_news%d_words%d_lr%.5f.ckpt' %
+                               (info, batch_size, num_head, drop_out, num_steps, max_num_news, max_num_words, lr))
+                    valid_mse = eval['mse']
+                    valid_acc = eval['acc']
+                    flag_cnt = 0
+                else:
+                    if flag_cnt > 1:
+                        break
+                    flag_cnt += 1
+        with tf.Session(config=config) as session:
+            saver.restore(session, 'model_saver/%smodel_batch%d_h%d_d%.2f_step%d_news%d_words%d_lr%.5f.ckpt' %
+                          (info, batch_size, num_head, drop_out, num_steps, max_num_news, max_num_words, lr))
             test_cost, att_cost, param_cost, acc = run_epoch(session, merged, model, test_data, 'test', False)
-            logger.info("Test Cost: %.3f %.3f %.3f, %.5f" % (test_cost, att_cost, param_cost, acc))
-            saver.save(session, 'model_saver/%smodel_batch%d_h%d_d%.2f_step%d_news%d_words%d_lr%.5f.ckpt' %
-                       (info, batch_size, num_head, drop_out, num_steps, max_num_news, max_num_words, lr))
+            logger.info(
+                logger.info(f"test_cost {test_cost}, att {att_cost}, param {param_cost}, {eval}"))
 
 
 if __name__ == "__main__":
