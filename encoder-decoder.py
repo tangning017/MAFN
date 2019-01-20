@@ -9,10 +9,10 @@ import numpy as np
 import reader
 from utils import eval_res
 
-info = "newsandprice"
+dataset_flag = 'tweets'
 logger = logging.getLogger('my_logger')
 logger.setLevel(logging.DEBUG)
-log_fp = '{0}.log'.format(f'{info}_model')
+log_fp = '{0}.log'.format(f'{dataset_flag}_model')
 file_handler = logging.FileHandler(log_fp)
 console_handler = logging.StreamHandler(sys.stdout)
 formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
@@ -21,47 +21,24 @@ console_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
-# root_path = "data/tweets/file/"
-# EMBEDDING_DIM = 50
-# HIDDEN_SIZE = 16
-# NUM_LAYERS = 1
-# NUM_CLASS = 1
-# PREDICT_STEPS = 1
-# NUM_EPOCH = 10
-# LINEAR_DIM = 64
-# DECAY_STEP = 10
-# DECAY_RATE = 0.96
-# STOCK_SIZE = 87
-# FEATURE_NUM = 4
-
-root_path = "data/news/file/"
-EMBEDDING_DIM = 300
-HIDDEN_SIZE = 16
-NUM_LAYERS = 1
-NUM_CLASS = 1
-PREDICT_STEPS = 1
-NUM_EPOCH = 15
-LINEAR_DIM = 64
-DECAY_STEP = 10
-DECAY_RATE = 0.96
-STOCK_SIZE = 200
-FEATURE_NUM = 9
-
 
 class StockMovementPrediction(object):
-    def __init__(self, batch_size, num_steps, linear_dim, num_head, drop_out,
-                 max_num_news, max_num_words, lr, vocab_size, att_lambda, param_lambda):
-        self.linear_dim = linear_dim
-        self.num_head = num_head
-        self.batch_size = batch_size
-        self.num_steps = num_steps
-        self.drop_out = drop_out
-        self.max_num_news = max_num_news
-        self.max_num_words = max_num_words
-        self.lr = lr
-        self.hidden_size = HIDDEN_SIZE
-        self.att_lambda = att_lambda
-        self.param_lambda = param_lambda
+    def __init__(self, config):
+        self.linear_dim = config['linear_dim']
+        self.num_head = config['num_head']
+        self.batch_size = config['batch_size']
+        self.num_steps = config['num_steps']
+        self.drop_out = config['drop_out']
+        self.max_num_news = config['max_num_news']
+        self.max_num_words = config['max_num_words']
+        self.feature_num = config['feature_num']
+        self.predict_steps = config['predict_steps']
+        self.embed_size = config['embed_size']
+        self.lr = config['lr']
+        self.hidden_size = config['hidden_size']
+        self.att_lambda = config['att_lambda']
+        self.param_lambda = config['param_lambda']
+        self.vocab_size = config['vocab_size']
         self.attention_reg = []
         self.final_state = None
         self.initial_state = None
@@ -69,20 +46,21 @@ class StockMovementPrediction(object):
         assert self.linear_dim % self.num_head == 0
 
         with tf.name_scope('input'):
-            self.input_data = tf.placeholder(tf.float32, [self.batch_size, self.num_steps, FEATURE_NUM], name="price")
-            self.targets = tf.placeholder(tf.float32, [self.batch_size, PREDICT_STEPS], name='rate')
+            self.input_data = tf.placeholder(tf.float32, [self.batch_size, self.num_steps, self.feature_num], name="price")
+            self.targets = tf.placeholder(tf.float32, [self.batch_size, self.predict_steps], name='rate')
             self.news_ph = tf.placeholder(tf.int64, [self.batch_size, self.num_steps, self.max_num_news,
                                                      self.max_num_words], name='news')
-            self.word_table_init = tf.placeholder(tf.float32, [vocab_size, EMBEDDING_DIM], name='word_embedding')
+            self.word_table_init = tf.placeholder(tf.float32, [self.vocab_size, self.embed_size], name='word_embedding')
             self.is_training = tf.placeholder(tf.bool, shape=(), name="train")
         with tf.name_scope('word_embeddings'):
             with tf.variable_scope('embeds'):
                 word_table = tf.get_variable('word_table', initializer=self.word_table_init, trainable=False)
                 self.news = tf.nn.embedding_lookup(word_table, self.news_ph, name='news_word_embeds')
-                self.news = tf.layers.dense(self.news, self.hidden_size, use_bias=False) # reduce the dimension of words
+                if self.embed_size > 50:
+                    self.news = tf.layers.dense(self.news, 50, use_bias=False) # reduce the dimension of words
 
         logger.info(
-            f"embedding_size:{EMBEDDING_DIM}, max_num_news:{self.max_num_news}, max_num_words:{self.max_num_words},"
+            f"embedding_size:{self.embed_size}, max_num_news:{self.max_num_news}, max_num_words:{self.max_num_words},"
             f" lr:{self.lr}, batch_size:{self.batch_size}, num_head:{self.num_head}, drop_out:{self.drop_out},"
             f" num_step:{self.num_steps}, att_lambda: {self.att_lambda}, param_lambda: {self.param_lambda}")
 
@@ -90,14 +68,13 @@ class StockMovementPrediction(object):
         logits = self.decode(outputs, self.final_state)
         with tf.name_scope("loss_function"):
             self.mse_loss = tf.losses.mean_squared_error(labels=self.targets, predictions=tf.squeeze(logits))
-            self.rmse_loss = tf.sqrt(self.mse_loss)
-            # self.cross_entropy = tf.losses.sparse_softmax_cross_entropy(labels=self.targets, logits=logits)
+            # self.rmse_loss = tf.sqrt(self.mse_loss)
             trainable_vars = tf.trainable_variables()
             self.param_loss = self.param_lambda * tf.reduce_mean([tf.nn.l2_loss(v) for v in trainable_vars if 'bias' not in v.name])
-            if len(self.attention_reg) == 0:
-                self.attention_reg = [0.0]
-            self.att_loss = self.att_lambda * tf.reduce_mean(self.attention_reg)
-            self.loss = self.rmse_loss + self.att_loss + self.param_loss
+            # if len(self.attention_reg) == 0:
+            #     self.attention_reg = [0.0]
+            # self.att_loss = self.att_lambda * tf.reduce_mean(self.attention_reg)
+            self.loss = self.mse_loss + self.param_loss
             self.prediction = logits
 
         if self.is_training is None:
@@ -105,7 +82,7 @@ class StockMovementPrediction(object):
 
         # Optimizer #
         global_step = tf.Variable(0, trainable=False)
-        learning_rate = tf.train.exponential_decay(self.lr, global_step, DECAY_STEP, DECAY_RATE, staircase=True)
+        learning_rate = tf.train.exponential_decay(self.lr, global_step, 10, 0.96, staircase=True)
         tf.summary.scalar('learning_rate', learning_rate)
         self.train_op = tf.train.AdamOptimizer(learning_rate).minimize(self.loss, global_step=global_step)
 
@@ -114,7 +91,7 @@ class StockMovementPrediction(object):
         :return:
         """
         encoder_cell = tf.contrib.rnn.LSTMCell(self.hidden_size)
-        cell = tf.nn.rnn_cell.MultiRNNCell([encoder_cell] * NUM_LAYERS)
+        cell = tf.nn.rnn_cell.MultiRNNCell([encoder_cell])
         self.initial_state = cell.zero_state(self.batch_size, tf.float32)
 
         outputs = []
@@ -164,7 +141,7 @@ class StockMovementPrediction(object):
             decoder_cell = tf.contrib.seq2seq.AttentionWrapper(decoder_cell, attention_mechanism,
                                                                attention_layer_size=self.hidden_size)
 
-            helper = tf.contrib.seq2seq.TrainingHelper(encode, [PREDICT_STEPS for _ in range(self.batch_size)],
+            helper = tf.contrib.seq2seq.TrainingHelper(encode, [self.predict_steps for _ in range(self.batch_size)],
                                                        time_major=True)
             decoder_initial_state = decoder_cell.zero_state(self.batch_size, tf.float32).clone(cell_state=state[0])
             decoder = tf.contrib.seq2seq.BasicDecoder(decoder_cell, helper, decoder_initial_state)
@@ -173,7 +150,7 @@ class StockMovementPrediction(object):
             outputs = tf.contrib.layers.batch_norm(outputs)
             if self.is_training is not None:
                 outputs = tf.layers.dropout(outputs, rate=self.drop_out)
-            logits = tf.layers.dense(outputs, NUM_CLASS)
+            logits = tf.layers.dense(outputs, 1)
         return logits
 
     @staticmethod
@@ -213,18 +190,14 @@ class StockMovementPrediction(object):
         return tf.reduce_max(v, axis=-3)
 
 
-def run_epoch(session, merged, model, data, flag, output_log):
+def run_epoch(session, merged, model, dataset, flag, output_log):
     total_costs = []
-    att_costs = []
-    param_costs = []
     state = session.run(model.initial_state)
     predictions = []
     ys = []
     iters = 0
-    for x, y, _, news, _ in reader.news_iterator(data, model.batch_size, model.num_steps,
-                                                 model.max_num_news, model.max_num_words, flag):
-        fetch = [model.loss, model.att_loss, model.param_loss,
-                 model.final_state, merged, model.prediction]
+    for x, y, news in dataset.gen_batch(flag, model.batch_size, model.num_steps, model.max_num_news, model.max_num_words):
+        fetch = [model.loss, model.final_state, merged, model.prediction]
         feed_dict = {model.input_data: x, model.targets: y, model.news_ph: news, model.initial_state: state}
         if flag == 'train':
             feed_dict[model.is_training] = flag
@@ -232,13 +205,11 @@ def run_epoch(session, merged, model, data, flag, output_log):
         else:
             fetch.append(tf.no_op())
 
-        cost, att_loss, param_loss, state, summary, prediction, _ = session.run(fetch, feed_dict)
+        cost, state, summary, prediction, _ = session.run(fetch, feed_dict)
         total_costs.append(cost)
-        att_costs.append(att_loss)
-        param_costs.append(param_loss)
         iters += model.num_steps
         if output_log and iters % 1000 == 0:
-            logger.info(f"cost {cost}, att {att_loss}, param {param_loss}, {eval_res(y, prediction)}")
+            logger.info(f"cost {cost}, {eval_res(y, prediction)}")
             sum_path = f'tensorboard/{flag}/%smodel_batch%d_h%d_d%.2f_step%d_news%d_words%d_lr%.5f'\
                        % (info, model.batch_size, model.num_head, model.drop_out, model.num_steps,
                           model.max_num_news, model.max_num_words, model.lr)
@@ -246,48 +217,53 @@ def run_epoch(session, merged, model, data, flag, output_log):
             writer.add_summary(summary, iters)
         predictions.append(prediction)
         ys.append(y)
-    return np.mean(total_costs), np.mean(att_costs), np.mean(param_costs), eval_res(predictions, ys)
+    return np.mean(total_costs), eval_res(predictions, ys)
 
 
-def tuning_parameter():
-    for num_step in [10]:
-        for att_lambda in [0.001]:
-            for param_lambda in [0.001]:
+def tuning_parameter(flag):
+    config = {'num_epoch': 15, 'linear_dim': 64, 'hidden_size': 16,
+              'feature_num': 4, 'predict_steps': 1, 'drop_out': 0.3, 'att_lambda': 0.0}
+    if flag == 'tweets':
+        config.update({'feature_num': 4, 'embed_size': 50})
+    else:
+        config.update({'feature_num': 9, 'embed_size': 300})
+    for num_steps in [10, 5, 20]:
+        for param_lambda in [0.001]:
+            for num_head in [4, 2]:
                 for lr in [0.001]:
-                    yield 10, 10, lr, 64, 4, 0.3, num_step, att_lambda, param_lambda
+                    for max_num_words in [10, 20, 30]:
+                        for max_num_news in [10, 30, 50]:
+                            for batch_size in [32, 64]:
+                                config.update({'batch_size': batch_size, 'num_steps': num_steps,
+                                               'param_lambda': param_lambda, 'lr': lr, "max_num_words": max_num_words,
+                                               'max_num_news': max_num_news, 'num_head': num_head})
+                                yield config
 
 
 def main(_):
-    train_data, valid_data, test_data = reader.news_raw_data()
-    word_table_init, vocab_size = reader.init_word_table()
-    parameter_gen = tuning_parameter()
+
+    dataset = reader.Dataset(dataset_flag)
+    word_table_init, vocab_size = dataset.init_word_table()
+    parameter_gen = tuning_parameter(dataset_flag)
     while True:
         try:
-            max_num_news, max_num_words, lr, batch_size, num_head, drop_out, num_steps,\
-                att_lambda, param_lambda = next(parameter_gen)
+            config = next(parameter_gen)
+            config['vocab_size'] = vocab_size
         except StopIteration:
             break
         initializer = tf.contrib.layers.xavier_initializer()
         tf.reset_default_graph()
-       # if os.path.exists(os.path.join(root_path, f"{info}train_preprocess.pkl")):
-       #     os.remove(os.path.join(root_path, f'{info}train_preprocess.pkl'))
-       # if os.path.exists(os.path.join(root_path, f"{info}valid_preprocess.pkl")):
-       #     os.remove(os.path.join(root_path, f'{info}valid_preprocess.pkl'))
-       # if os.path.exists(os.path.join(root_path, f"{info}test_preprocess.pkl")):
-       #     os.remove(os.path.join(root_path, f'{info}test_preprocess.pkl'))
         with tf.name_scope("Train"):
             with tf.variable_scope("StockMovementPrediction", reuse=None, initializer=initializer):
-                model = StockMovementPrediction(batch_size, num_steps,
-                                                LINEAR_DIM, num_head, drop_out, max_num_news,
-                                                max_num_words, lr, vocab_size, att_lambda, param_lambda)
+                model = StockMovementPrediction(config)
         saver = tf.train.Saver()
         merged = tf.summary.merge_all()
-        config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True
+        gpu_config = tf.ConfigProto()
+        gpu_config.gpu_options.allow_growth = True
         valid_mse = 1
         valid_acc = 0
         flag_cnt = 0
-        with tf.Session(config=config) as session:
+        with tf.Session(config=gpu_config) as session:
             init = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
             session.run(init, feed_dict={model.word_table_init: word_table_init})
             total_parameters = 0
@@ -298,19 +274,16 @@ def main(_):
                     variable_parameters += dim.value
                 total_parameters += variable_parameters
             logger.info("total parameters: %d", total_parameters)
-            for i in range(NUM_EPOCH):
-                train_cost, att_cost, param_cost, eval = \
-                    run_epoch(session, merged, model, train_data, 'train', True)
-                logger.info(logger.info(f"Epoch {i+1} train_cost {train_cost},"
-                                        f" att {att_cost}, param {param_cost}, {eval}"))
-                valid_cost, att_cost, param_cost, eval = \
-                    run_epoch(session, merged, model, valid_data, 'valid', False)
-                logger.info(
-                    logger.info(f"Epoch {i + 1} valid_cost {valid_cost},"
-                                f" att {att_cost}, param {param_cost}, {eval}"))
+            for i in range(config['num_epoch']):
+                train_cost, eval = run_epoch(session, merged, model, dataset, 'train', True)
+                logger.info(f"Epoch {i+1} train_cost {train_cost}, {eval}")
+                valid_cost, eval = run_epoch(session, merged, model, dataset, 'valid', False)
+                logger.info(f"Epoch {i+1} valid_cost {valid_cost}, {eval}")
+
                 if eval['mse'] > valid_mse or eval['acc'] > valid_acc:
                     saver.save(session, 'model_saver/%smodel_batch%d_h%d_d%.2f_step%d_news%d_words%d_lr%.5f.ckpt' %
-                               (info, batch_size, num_head, drop_out, num_steps, max_num_news, max_num_words, lr))
+                               (info, config['batch_size'], config['num_head'], config['drop_out'],
+                                config['num_steps'], config['max_num_news'], config['max_num_words'], config['lr']))
                     valid_mse = eval['mse']
                     valid_acc = eval['acc']
                     flag_cnt = 0
@@ -318,12 +291,12 @@ def main(_):
                     if flag_cnt > 1:
                         break
                     flag_cnt += 1
-        with tf.Session(config=config) as session:
+        with tf.Session(config=gpu_config) as session:
             saver.restore(session, 'model_saver/%smodel_batch%d_h%d_d%.2f_step%d_news%d_words%d_lr%.5f.ckpt' %
-                          (info, batch_size, num_head, drop_out, num_steps, max_num_news, max_num_words, lr))
-            test_cost, att_cost, param_cost, acc = run_epoch(session, merged, model, test_data, 'test', False)
-            logger.info(
-                logger.info(f"test_cost {test_cost}, att {att_cost}, param {param_cost}, {eval}"))
+                          (info, config['batch_size'], config['num_head'], config['drop_out'],
+                           config['num_steps'], config['max_num_news'], config['max_num_words'], config['lr']))
+            test_cost, eval = run_epoch(session, merged, model, dataset, 'test', False)
+            logger.info(f"test_cost {test_cost}, {eval}")
 
 
 if __name__ == "__main__":

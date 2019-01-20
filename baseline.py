@@ -1,5 +1,4 @@
 from sklearn.ensemble import RandomForestRegressor
-# import reader_v1 as reader
 import reader
 from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
@@ -55,9 +54,9 @@ def grid_search(alg, train_features, train_labels):
 
 
 def train_test(alg):
-    train_data, valid_data, test_data = reader.news_raw_data()
-    train_feature, train_rate = reader.classif_feature_union(train_data)
-    test_feature, test_rate = reader.classif_feature_union(test_data)
+    dataset = reader.Dataset("tweets")
+    train_feature, train_rate = dataset.rf_feature_union("train")
+    test_feature, test_rate = dataset.rf_feature_union("test")
     estimator = grid_search(alg, train_feature, train_rate)
     pred_rate = estimator.predict(test_feature)
     print(pred_rate, test_rate)
@@ -65,7 +64,8 @@ def train_test(alg):
 
 
 def arima():
-    history, test = reader.series_feature_union()
+    dataset = reader.Dataset("tweets")
+    history, test = dataset.series_feature_union()
     predictions = []
     all_test = []
     i = 1
