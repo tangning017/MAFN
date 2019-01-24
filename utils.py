@@ -42,13 +42,15 @@ def get_padding_bias(x):
     return attention_bias
 
 
-def eval_res(true_rate, pred_rate):
-    true_rate = np.array(true_rate).reshape(-1)
-    pred_rate = np.array(pred_rate).reshape(-1)
-    mse = mean_squared_error(true_rate, pred_rate)
-    mae = mean_absolute_error(true_rate, pred_rate)
-    true_label = [1 if rate > 0 else 0 for rate in true_rate]
-    pred_label = [1 if rate > 0 else 0 for rate in pred_rate]
+def eval_res(true_rate, pred_rate, classiforregress='classif'):
+    true_rate = np.array(true_rate).flatten()
+    pred_rate = np.array(pred_rate).flatten()
+    if classiforregress == 'regress':
+        true_label = [1 if rate > 0 else 0 for rate in true_rate]
+        pred_label = [1 if rate > 0 else 0 for rate in pred_rate]
+    else:
+        true_label = np.array(true_rate, dtype=np.int64)
+        pred_label = np.array(pred_rate, dtype=np.int64)
     mcc = matthews_corrcoef(true_label, pred_label)
     acc = accuracy_score(true_label, pred_label)
     try:
@@ -56,7 +58,7 @@ def eval_res(true_rate, pred_rate):
     except:
         auc = np.float("NaN")
 
-    return {'mcc': mcc, 'acc': acc, 'auc': auc, 'mse': mse, 'mae': mae}
+    return {'mcc': mcc, 'acc': acc, 'auc': auc}
 
 
 def eval_res_classif(true_rate, pred_rate):

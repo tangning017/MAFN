@@ -7,16 +7,14 @@ import json
 import ast
 
 TRAIN = 'train'
-times = 1.0
 
 
 class Dataset(object):
-    def __init__(self, tweets):
+    def __init__(self, tweets, classiforregress='regress'):
         if tweets == 'tweets':
             self.root_path = 'data/tweet/file'
             self.vec_path = 'data/tweet'
             self.feature_col = ['Open_rate', 'High_rate', 'Low_rate', 'Close_rate']
-            self.label_col = ['mv']
             self.embed_size = 50
             self.training_begin_date = 20140101
             self.training_end_date = 20150801
@@ -27,9 +25,8 @@ class Dataset(object):
         else:
             self.root_path = 'data/news/file'
             self.vec_path = "data/news"
-            self.feature_col =['turnoverRate', 'accumAdjFactor', 'chgPct', 'PE',
-                          'PB', 'vwap', 'high_rate', 'low_rate', 'close_rate']
-            self.label_col = ['mv']
+            self.feature_col = ['turnoverRate', 'accumAdjFactor', 'chgPct',
+                               'PE', 'PB', 'vwap', 'high_rate', 'low_rate', 'close_rate']
             self.embed_size = 300
             self.training_begin_date = 20140101
             self.training_end_date = 20170101
@@ -40,6 +37,11 @@ class Dataset(object):
         self.train_data = None
         self.valid_data = None
         self.test_data = None
+        self.classiforregress = classiforregress
+        if classiforregress == 'regress':
+            self.label_col = ['mv']
+        else:
+            self.label_col = ['label']
         with open(os.path.join(self.vec_path, "vocab_vec.json"), 'r') as f:
             self.dit = json.load(f)
             self.word2id = {word: i for i, word in enumerate(self.dit.keys())}
@@ -70,7 +72,7 @@ class Dataset(object):
             data = self.test_data
         word2id = self.word2id
 
-        preprocess_path = f'{flag}_preprocess_{num_step}_{max_news_sequence}_{max_word_sequence}.pkl'
+        preprocess_path = f'{self.classiforregress}_{flag}_preprocess_{num_step}_{max_news_sequence}_{max_word_sequence}.pkl'
         preprocess_path = os.path.join(self.root_path, preprocess_path)
         x_all = []
         y_all = []
@@ -131,7 +133,7 @@ class Dataset(object):
             with open(preprocess_path, 'wb') as f:
                 pickle.dump(preprocess_data, f)
         return np.array(x_all, dtype=np.float32),\
-                np.array(y_all, dtype=np.float32)*times, \
+                np.array(y_all, dtype=np.float32), \
                np.array(news_all, dtype=np.int64)
 
     def gen_batch(self, flag, batch_size, num_step, max_news_sequence, max_word_sequence):
@@ -151,7 +153,7 @@ class Dataset(object):
                     news_batch += [news_all[indices[i]]]
                 # print(np.array(x_batch))
                 yield np.array(x_batch, dtype=np.float32),\
-                    np.array(y_batch, dtype=np.float32)*times,\
+                    np.array(y_batch, dtype=np.float32),\
                     np.array(news_batch, dtype=np.int64)
 
     def rf_feature_union(self, flag):
@@ -190,10 +192,8 @@ class Dataset(object):
                         daily_news_rep = np.mean(daily_news, axis=0)   # average pooling
                     else:
                         daily_news_rep = np.zeros(self.embed_size)
-                # print(np.array(feature_price).shape, np.array(daily_news_rep).shape)
                 feature_all.append(np.concatenate((feature_price, daily_news_rep)))
-                # feature_all.append(feature_price)
-                label_all.append(label*times)
+                label_all.append(label)
         return feature_all, label_all
 
     def series_feature_union(self):
@@ -211,8 +211,10 @@ class Dataset(object):
                 df = df[(df.mv < -0.005) | (df.mv > 0.0055)]
             df = df.sort_values(by=['date'], ascending=True)
             # each dataframe contains one stock
-            history.append(df[(df.date >= self.training_begin_date) & (df.date < self.validing_end_date)][self.label_col].values*times)
-            test.append(df[(df.date >= self.validing_end_date) & (df.date < self.testing_end_date)][self.label_col].values*times)
+            history.append(df[(df.date >= self.training_begin_date) &
+                              (df.date < self.validing_end_date)][self.label_col].values)
+            test.append(df[(df.date >= self.validing_end_date) &
+                           (df.date < self.testing_end_date)][self.label_col].values)
         return history, test
 
     def news_raw_data(self):
@@ -233,9 +235,9 @@ class Dataset(object):
             df['mv'] = df['mv'].astype('float32')
             df['date'] = df['date'].astype('int64')
             if self.info == 'news':
-                df = df[(df.mv < -0.0015)|(df.mv > 0.003)]
+                df = df[(df.mv < -0.0015) | (df.mv > 0.003)]
             else:
-                df = df[(df.mv < -0.005)|(df.mv > 0.0055)]
+                df = df[(df.mv < -0.005) | (df.mv > 0.0055)]
             df = df.sort_values(by=['date'], ascending=True)
             # each dataframe contains one stock
             training_prices += [df[(df.date>=self.training_begin_date)&(df.date<self.training_end_date)][self.feature_col].reset_index(drop=True)]

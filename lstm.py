@@ -1,4 +1,4 @@
-from keras.layers import LSTM, Dense, InputLayer, BatchNormalization, Dropout
+from keras.layers import LSTM, Dense, InputLayer, BatchNormalization, Dropout, LeakyReLU
 from keras.callbacks import EarlyStopping
 from keras.models import Sequential
 import reader
@@ -17,26 +17,27 @@ def create_model():
     model.add(InputLayer(input_shape=(10, 4)))
     model.add(BatchNormalization())
     model.add(LSTM(32))
-    model.add(BatchNormalization())
+    # model.add(BatchNormalization())
     model.add(Dropout(0.3))
-    model.add(Dense(1))
-    model.compile(optimizer='Adam', loss='mse', metrics=['mae', 'mape'])
+    model.add(Dense(1, activation=tf.nn.relu))
+    model.compile(optimizer='Adam', loss='binary_crossentropy', metrics=['accuracy'])
     return model
 
 
 def run_epoch():
-    dataset = reader.Dataset("tweets")
+    dataset = reader.Dataset("news", 'classif')
     model = create_model()
     x, y, _ = dataset.news_iterator('train', 10, 10, 10)
     valid_x, valid_y, _ = dataset.news_iterator('valid', 10, 10, 10)
-    early_stop = EarlyStopping(patience=1)
+    early_stop = EarlyStopping(monitor='val_acc', patience=1)
     model.fit(x, y, epochs=10, batch_size=32, verbose=1, validation_data=(valid_x, valid_y), callbacks=[early_stop])
     x, y, _ = dataset.news_iterator('test', 10, 10, 10)
     preds = model.predict(x)
-    print(f"test {len(y)} res: ", eval_res(preds, y))
-    print(preds.reshape(-1))
+    preds = [1 if x >= 0.5 else 0 for x in preds.reshape(-1)]
+    print(f"test {len(y)} res: ", eval_res(y,  preds))
+    print(preds)
     print(y.reshape(-1))
-    model.save("weights/my_model.h5")
+    # model.save("weights/my_model.h5")
 
 
 if __name__ == "__main__":
